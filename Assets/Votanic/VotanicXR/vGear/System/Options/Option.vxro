@@ -855,8 +855,7 @@
     },
     "Teleport": {
         "MaxStorePoint": 10,
-        "Waypoint": [
-        ]
+        "Waypoint": []
     },
     "ScenesInBuild": []
 }
