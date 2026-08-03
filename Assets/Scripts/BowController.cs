@@ -2,11 +2,11 @@ using UnityEngine;
 using Votanic.vXR.vCast;
 
 /// <summary>
-/// Desktop PC: bow follows the view camera every frame (camera is never modified).
-/// Hold RMB to draw, release to shoot along camera forward.
-/// Tracked XR: bow on left hand, hold any axis (trigger) to draw, release to shoot.
+/// Desktop PC: bow + held arrow follow vCast Head (mouse look) in world space each LateUpdate.
+/// Hold RMB to draw, release to shoot along look forward.
+/// Tracked XR: bow on left hand, nock near right hand + axis, pull for power.
 /// </summary>
-[DefaultExecutionOrder(100)]
+[DefaultExecutionOrder(1000)]
 public class BowController : MonoBehaviour
 {
     [Header("Arrow")]
@@ -14,6 +14,10 @@ public class BowController : MonoBehaviour
     [SerializeField] private Transform arrowRest;
     [Tooltip("Bow model string control (moves the string curve). Follows right hand / arrow rear while drawing.")]
     [SerializeField] private Transform bowString;
+    [Tooltip("If set (or found in scene), arrows come from the quiver instead of auto-spawning.")]
+    [SerializeField] private ArrowQuiver quiver;
+    [Tooltip("When no quiver is used, keep a held arrow available automatically (desktop testing).")]
+    [SerializeField] private bool autoSpawnHeldArrow = true;
 
     [Header("Shot")]
     [SerializeField] private float minSpeed = 2f;
@@ -22,12 +26,16 @@ public class BowController : MonoBehaviour
     [SerializeField, Range(0f, 1f)] private float minDrawToShoot = 0.02f;
 
     [Header("Desktop")]
-    [Tooltip("Leave empty to use PlayEnvironment.ResolveViewCamera(). Assign if the wrong camera is picked.")]
-    [SerializeField] private Camera viewCamera;
     [SerializeField] private Vector3 holdOffset = new Vector3(0.25f, -0.2f, 0.55f);
     [SerializeField] private Vector3 holdEuler;
     [SerializeField] private float fullDrawTime = 0.75f;
     [SerializeField] private float pullDistance = 0.35f;
+    [Tooltip("Local offset of the held arrow relative to the bow (before tip is aimed along look).")]
+    [SerializeField] private Vector3 desktopArrowLocalPosition;
+    [Tooltip("Local euler of held arrow under the bow. (0,-90,0) for tip-along-+X meshes.")]
+    [SerializeField] private Vector3 desktopArrowLocalEuler = new Vector3(0f, -90f, 0f);
+    [Tooltip("Also shoot with Space on desktop (backup if RMB is eaten by Votanic).")]
+    [SerializeField] private bool desktopSpaceToShoot = true;
 
     [Header("Tracked XR")]
     [SerializeField] private LeftHandChild leftHandChild;
@@ -46,6 +54,8 @@ public class BowController : MonoBehaviour
     [SerializeField] private Vector3 rightHandArrowLocalPosition;
     [Tooltip("Idle arrow on right hand. (0,-90,0) matches imported tip-along-+X meshes.")]
     [SerializeField] private Vector3 rightHandArrowLocalEuler = new Vector3(0f, -90f, 0f);
+    [Tooltip("Hide Votanic wand laser while an arrow is in hand (uses DisplayWandRay / EnableWandRay).")]
+    [SerializeField] private bool hideWandRayWhileHoldingArrow = true;
 
     private enum State { Idle, Drawing }
 
@@ -60,6 +70,36 @@ public class BowController : MonoBehaviour
     private float nextNockDebugTime;
     private Vector3 bowStringRestLocalPos;
     private bool hasBowStringRest;
+    private bool wandRayForcedHidden;
+    private bool loggedDesktopHead;
+    private bool rmbWasHeld;
+
+    public bool HasArrowInHand => arrow != null;
+
+    public Transform RightHandTransform
+    {
+        get
+        {
+            FindRightHand();
+            return rightHand;
+        }
+    }
+
+    public bool IsRightHandNearBow
+    {
+        get
+        {
+            FindRightHand();
+            if (rightHand == null)
+            {
+                return false;
+            }
+
+            return GetHandsDistance() <= nockStartDistance;
+        }
+    }
+
+    private bool UsesQuiver => quiver != null;
 
     private void Awake()
     {
@@ -73,9 +113,22 @@ public class BowController : MonoBehaviour
             leftHandChild = GetComponent<LeftHandChild>();
         }
 
+        if (quiver == null)
+        {
+#if UNITY_2023_1_OR_NEWER
+            quiver = FindFirstObjectByType<ArrowQuiver>();
+#else
+            quiver = FindObjectOfType<ArrowQuiver>();
+#endif
+        }
+
         bowColliders = GetComponentsInChildren<Collider>(true);
         CacheBowStringRest();
-        SpawnArrow();
+
+        if (!UsesQuiver && autoSpawnHeldArrow)
+        {
+            SpawnArrow();
+        }
     }
 
     private void CacheBowStringRest()
@@ -100,24 +153,22 @@ public class BowController : MonoBehaviour
     {
         PlayEnvironment.EnvironmentChanged -= RefreshMode;
         CancelDraw();
+        SetWandRayVisible(true);
+        wandRayForcedHidden = false;
     }
 
     private void Update()
     {
+        if (!IsSceneInstance)
+        {
+            return;
+        }
+
+        desktop = PlayEnvironment.IsDesktopInput;
+
         if (desktop)
         {
-            if (state == State.Idle && Input.GetMouseButtonDown(1))
-            {
-                BeginDraw();
-            }
-            else if (state == State.Drawing && Input.GetMouseButtonUp(1))
-            {
-                Release();
-            }
-            else if (state == State.Drawing && Input.GetMouseButton(1))
-            {
-                draw = Mathf.Clamp01(draw + Time.deltaTime / fullDrawTime);
-            }
+            DesktopInput();
         }
         else
         {
@@ -127,6 +178,13 @@ public class BowController : MonoBehaviour
 
     private void LateUpdate()
     {
+        if (!IsSceneInstance)
+        {
+            return;
+        }
+
+        desktop = PlayEnvironment.IsDesktopInput;
+
         if (!desktop)
         {
             if (leftHandChild != null && leftHandChild.isActiveAndEnabled)
@@ -135,6 +193,7 @@ public class BowController : MonoBehaviour
             }
 
             FindRightHand();
+            UpdateWandRayVisibility();
 
             if (state == State.Idle)
             {
@@ -149,18 +208,16 @@ public class BowController : MonoBehaviour
             return;
         }
 
-        FollowCamera();
-
-        if (state == State.Drawing && arrow != null)
-        {
-            arrow.PullBack(draw, pullDistance);
-        }
+        // Desktop: drive pose in LateUpdate AFTER Votanic applies VirtualTracker0 to Head.
+        ApplyDesktopPose();
+        UpdateWandRayVisibility();
     }
 
     private void RefreshMode()
     {
         CancelDraw();
         desktop = PlayEnvironment.IsDesktopInput;
+        loggedDesktopHead = false;
 
         if (leftHandChild != null)
         {
@@ -169,55 +226,310 @@ public class BowController : MonoBehaviour
 
         if (desktop)
         {
-            transform.SetParent(null, true);
-            FollowCamera();
+            ApplyDesktopPose();
         }
         else if (leftHandChild != null)
         {
             leftHandChild.FollowBoundHand();
         }
 
-        SpawnArrow();
+        if (!UsesQuiver && autoSpawnHeldArrow)
+        {
+            SpawnArrow();
+        }
 
-        if (!desktop)
+        if (!desktop && logInputDetection)
         {
             Debug.Log(
-                "BowController: CAVE mode — hands within "
-                + nockStartDistance.ToString("0.00")
-                + "m + trigger to nock, then pull for power.",
+                UsesQuiver
+                    ? "BowController: CAVE mode — pick arrows from the quiver, then nock/pull/release."
+                    : "BowController: CAVE mode — hands within "
+                      + nockStartDistance.ToString("0.00")
+                      + "m + trigger to nock, then pull for power.",
                 this);
         }
     }
 
-    private Camera GetViewCamera()
+    // -------------------------------------------------------------------------
+    // Desktop
+    // -------------------------------------------------------------------------
+
+    private void DesktopInput()
     {
-        if (viewCamera != null && viewCamera.isActiveAndEnabled)
+        // RMB and optional Space (Votanic sometimes eats Mouse1).
+        bool held = Input.GetMouseButton(1)
+                    || Input.GetKey(KeyCode.Mouse1)
+                    || (desktopSpaceToShoot && Input.GetKey(KeyCode.Space));
+
+        if (held && !rmbWasHeld)
         {
-            return viewCamera;
+            if (state == State.Idle)
+            {
+                BeginDraw();
+            }
         }
 
-        return PlayEnvironment.ResolveViewCamera();
+        if (held && state == State.Drawing)
+        {
+            draw = Mathf.Clamp01(draw + Time.deltaTime / Mathf.Max(0.01f, fullDrawTime));
+        }
+
+        if (!held && rmbWasHeld && state == State.Drawing)
+        {
+            Release();
+        }
+
+        rmbWasHeld = held;
     }
 
-    private void FollowCamera()
+    /// <summary>
+    /// Parent bow under the live view camera (what the player actually sees).
+    /// Arrow is a child of the bow so both follow look + locomotion with the hierarchy.
+    /// </summary>
+    private bool IsSceneInstance =>
+        gameObject.scene.IsValid() && gameObject.scene.isLoaded;
+
+    private void ApplyDesktopPose()
     {
-        Camera cam = GetViewCamera();
-        if (cam == null)
+        if (!IsSceneInstance)
         {
             return;
         }
 
-        Transform t = cam.transform;
-        transform.SetPositionAndRotation(
-            t.TransformPoint(holdOffset),
-            t.rotation * Quaternion.Euler(holdEuler));
+        Transform anchor = ResolveDesktopAnchor();
+        if (anchor == null)
+        {
+            if (logInputDetection && Time.frameCount % 120 == 0)
+            {
+                Debug.LogWarning("BowController: desktop view anchor not found yet.", this);
+            }
+
+            return;
+        }
+
+        if (!anchor.gameObject.scene.IsValid())
+        {
+            if (logInputDetection && Time.frameCount % 120 == 0)
+            {
+                Debug.LogWarning("BowController: view anchor is a Prefab asset, not a scene camera.", this);
+            }
+
+            return;
+        }
+
+        if (transform.parent != anchor)
+        {
+            transform.SetParent(anchor, false);
+            if (logInputDetection)
+            {
+                Debug.Log("BowController: desktop bow parented to '" + GetPath(anchor) + "'.", this);
+            }
+        }
+
+        transform.localPosition = holdOffset;
+        transform.localRotation = Quaternion.Euler(holdEuler);
+
+        if (!loggedDesktopHead && logInputDetection)
+        {
+            loggedDesktopHead = true;
+            Debug.Log("BowController: desktop following '" + GetPath(anchor) + "'.", this);
+        }
+
+        if (arrow != null)
+        {
+            PlaceDesktopArrow(anchor);
+        }
     }
+
+    private Transform ResolveDesktopAnchor()
+    {
+        Camera cam = PlayEnvironment.ResolveViewCamera();
+        if (cam != null)
+        {
+            return cam.transform;
+        }
+
+        return PlayEnvironment.ResolveDesktopBowParent();
+    }
+
+    private void PlaceDesktopArrow(Transform anchor)
+    {
+        if (arrow == null || !IsSceneInstance)
+        {
+            return;
+        }
+
+        if (!arrow.gameObject.scene.IsValid())
+        {
+            Debug.LogError("BowController: held arrow is a Prefab asset — equip must Instantiate.", this);
+            arrow = null;
+            return;
+        }
+
+        arrow.PrepareHeld();
+
+        if (arrow.transform.parent != transform)
+        {
+            arrow.transform.SetParent(transform, false);
+        }
+
+        Vector3 localPos = desktopArrowLocalPosition;
+        if (state == State.Drawing)
+        {
+            localPos += Vector3.back * (pullDistance * Mathf.Clamp01(draw));
+        }
+
+        arrow.transform.localPosition = localPos;
+
+        Vector3 look = anchor.forward.sqrMagnitude > 1e-6f ? anchor.forward.normalized : transform.forward;
+        arrow.transform.rotation = arrow.RotationForDirection(look);
+
+        if (arrow.Tip == null || arrow.Rear == null)
+        {
+            arrow.transform.localRotation = Quaternion.Euler(desktopArrowLocalEuler);
+        }
+    }
+
+    private Vector3 DesktopShotDirection()
+    {
+        if (arrow != null)
+        {
+            Vector3 tip = arrow.TipWorldDirection;
+            if (tip.sqrMagnitude > 1e-6f)
+            {
+                return tip.normalized;
+            }
+        }
+
+        Transform anchor = ResolveDesktopAnchor();
+        if (anchor != null && anchor.forward.sqrMagnitude > 1e-6f)
+        {
+            return anchor.forward.normalized;
+        }
+
+        return transform.forward;
+    }
+
+    // -------------------------------------------------------------------------
+    // Wand ray (official Votanic API — SetActive alone is overwritten every frame)
+    // -------------------------------------------------------------------------
+
+    private void UpdateWandRayVisibility()
+    {
+        if (!hideWandRayWhileHoldingArrow)
+        {
+            return;
+        }
+
+        bool wantHidden = HasArrowInHand;
+        if (wantHidden)
+        {
+            SetWandRayVisible(false);
+            wandRayForcedHidden = true;
+        }
+        else if (wandRayForcedHidden)
+        {
+            SetWandRayVisible(true);
+            wandRayForcedHidden = false;
+        }
+    }
+
+    private void SetWandRayVisible(bool visible)
+    {
+        // 1) Official API — Votanic reapplies wand display every frame, so we must call this
+        //    from LateUpdate (order 1000) every frame while the arrow is held.
+        try
+        {
+            if (vCast.controller != null)
+            {
+                vCast.controller.DisplayWandRay(visible);
+                vCast.controller.EnableWandRay(visible);
+            }
+        }
+        catch (System.Exception exception)
+        {
+            if (logInputDetection && Time.frameCount % 180 == 0)
+            {
+                Debug.LogWarning("BowController: DisplayWandRay failed: " + exception.Message, this);
+            }
+        }
+
+        // 2) Hierarchy backup: Head/Hand/Controller/Wand/{Beam,Point,Ring}
+        Transform wand = ResolveWandTransform();
+        if (wand == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < wand.childCount; i++)
+        {
+            Transform child = wand.GetChild(i);
+            if (!IsWandVisualName(child.name))
+            {
+                continue;
+            }
+
+            if (child.gameObject.activeSelf != visible)
+            {
+                child.gameObject.SetActive(visible);
+            }
+        }
+    }
+
+    private static bool IsWandVisualName(string name)
+    {
+        return string.Equals(name, "Beam", System.StringComparison.OrdinalIgnoreCase)
+               || string.Equals(name, "Point", System.StringComparison.OrdinalIgnoreCase)
+               || string.Equals(name, "Ring", System.StringComparison.OrdinalIgnoreCase)
+               || string.Equals(name, "Cursor", System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    private Transform ResolveWandTransform()
+    {
+        Transform head = PlayEnvironment.ResolveDesktopBowParent();
+        if (head != null)
+        {
+            Transform byPath = FindChildPathIgnoreCase(head, "Hand", "Controller", "Wand");
+            if (byPath != null)
+            {
+                return byPath;
+            }
+        }
+
+        Transform vGear = PlayEnvironment.ResolveVGearTransform();
+        if (vGear != null)
+        {
+            Transform byPath = FindChildPathIgnoreCase(vGear, "Frame", "User", "Head", "Hand", "Controller", "Wand");
+            if (byPath != null)
+            {
+                return byPath;
+            }
+        }
+
+        return FindByName("Wand");
+    }
+
+    // -------------------------------------------------------------------------
+    // Draw / release
+    // -------------------------------------------------------------------------
 
     private void BeginDraw()
     {
-        SpawnArrow();
         if (arrow == null)
         {
+            if (!UsesQuiver && autoSpawnHeldArrow)
+            {
+                SpawnArrow();
+            }
+        }
+
+        if (arrow == null)
+        {
+            if (logInputDetection)
+            {
+                Debug.Log("Bow: RMB draw ignored — no arrow in hand (pick from quiver).", this);
+            }
+
             return;
         }
 
@@ -226,12 +538,10 @@ public class BowController : MonoBehaviour
 
         if (desktop)
         {
-            arrow.Nock(arrowRest);
-            arrow.PullBack(0f, pullDistance);
+            ApplyDesktopPose();
         }
         else
         {
-            // Keep arrow free so LateUpdate can place nock on the right hand.
             arrow.transform.SetParent(null, true);
         }
     }
@@ -244,39 +554,61 @@ public class BowController : MonoBehaviour
         }
 
         float power = draw;
-        Vector3 dir = ShotDirection();
+        Vector3 dir = desktop ? DesktopShotDirection() : ShotDirectionTracked();
         state = State.Idle;
         draw = 0f;
+        rmbWasHeld = Input.GetMouseButton(1) || Input.GetKey(KeyCode.Mouse1)
+                     || (desktopSpaceToShoot && Input.GetKey(KeyCode.Space));
 
         if (arrow == null)
         {
             return;
         }
 
-        if (power < minDrawToShoot)
+        // Desktop: always fire once drawn (even a tap). CAVE keeps the flop-cancel threshold.
+        if (!desktop && power < minDrawToShoot)
         {
             if (logInputDetection)
             {
-                Debug.Log($"Bow CAVE: release ignored (draw={power:0.00}).", this);
+                Debug.Log($"Bow: release ignored (draw={power:0.00}).", this);
             }
 
             ResetBowString();
-            UpdateIdleArrowVisual();
+            RestoreHeldArrowPose();
             return;
+        }
+
+        // Tiny desktop tap still gets a minimum launch so it is visibly "a shot".
+        if (desktop)
+        {
+            power = Mathf.Max(power, 0.15f);
         }
 
         float speed = Mathf.Lerp(minSpeed, maxSpeed, power);
         ArrowProjectile shot = arrow;
         arrow = null;
+
+        // Clear wand hide before flight so restore path is clean after shot.
+        if (wandRayForcedHidden)
+        {
+            SetWandRayVisible(true);
+            wandRayForcedHidden = false;
+        }
+
         if (logInputDetection)
         {
-            Debug.Log($"Bow CAVE: shot draw={power:0.00} speed={speed:0.0} dir={dir}.", this);
+            Debug.Log($"Bow: shot draw={power:0.00} speed={speed:0.0} dir={dir}.", this);
         }
 
         shot.Fire(dir, speed, bowColliders);
         ResetBowString();
-        SpawnArrow();
-        UpdateIdleArrowVisual();
+
+        if (!UsesQuiver && autoSpawnHeldArrow)
+        {
+            SpawnArrow();
+        }
+
+        RestoreHeldArrowPose();
     }
 
     private void CancelDraw()
@@ -289,24 +621,11 @@ public class BowController : MonoBehaviour
             return;
         }
 
-        if (desktop)
-        {
-            arrow.Nock(arrowRest);
-        }
-        else
-        {
-            UpdateIdleArrowVisual();
-        }
+        RestoreHeldArrowPose();
     }
 
-    private Vector3 ShotDirection()
+    private Vector3 ShotDirectionTracked()
     {
-        if (desktop)
-        {
-            Camera cam = GetViewCamera();
-            return cam != null ? cam.transform.forward : transform.forward;
-        }
-
         Vector3 restPos = GetArrowRestPosition();
         if (rightHand != null)
         {
@@ -329,6 +648,10 @@ public class BowController : MonoBehaviour
 
         return transform.position;
     }
+
+    // -------------------------------------------------------------------------
+    // Tracked XR
+    // -------------------------------------------------------------------------
 
     private void TrackedInput()
     {
@@ -372,7 +695,6 @@ public class BowController : MonoBehaviour
                 return;
             }
 
-            // Pull power: 0 at nock range, 1 when rear→rest ≈ arrow shaft length (tip at rest).
             float fullPull = maxDrawDistance;
             if (arrow != null)
             {
@@ -384,11 +706,6 @@ public class BowController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Gap between right-hand tracker and bow / left hand.
-    /// Do NOT include the arrow — when the arrow is parented to the right hand that
-    /// distance is ~0 and breaks both nock gating and draw power.
-    /// </summary>
     private float GetHandsDistance()
     {
         if (rightHand == null)
@@ -420,15 +737,12 @@ public class BowController : MonoBehaviour
             return;
         }
 
-        // ArrowRear on right hand, tip aimed at the bow rest.
         Vector3 restPos = GetArrowRestPosition();
         Vector3 rearPos = rightHand.position;
         Vector3 toRest = restPos - rearPos;
         Vector3 dir = toRest.sqrMagnitude > 0.0001f ? toRest.normalized : transform.forward;
 
         arrow.PlaceRearAt(rearPos, dir);
-
-        // String control point = nock (arrow rear / right hand).
         UpdateBowString(arrow.Rear != null ? arrow.Rear.position : rearPos);
     }
 
@@ -452,12 +766,9 @@ public class BowController : MonoBehaviour
         bowString.localPosition = bowStringRestLocalPos;
     }
 
-    /// <summary>
-    /// Idle: shaft centered on right hand, tip pointing hand-forward.
-    /// </summary>
     private void UpdateIdleArrowVisual()
     {
-        if (arrow == null || !idleArrowOnRightHand || rightHand == null)
+        if (desktop || arrow == null || !idleArrowOnRightHand || rightHand == null)
         {
             return;
         }
@@ -466,15 +777,102 @@ public class BowController : MonoBehaviour
         arrow.PlaceCenterAt(holdPos, rightHand.forward);
     }
 
-    private void SpawnArrow()
+    private void RestoreHeldArrowPose()
     {
-        if (arrow != null || arrowPrefab == null || arrowRest == null)
+        if (arrow == null)
         {
             return;
         }
 
-        arrow = Instantiate(arrowPrefab, arrowRest);
-        arrow.Nock(arrowRest);
+        if (desktop)
+        {
+            ApplyDesktopPose();
+        }
+        else
+        {
+            UpdateIdleArrowVisual();
+        }
+    }
+
+    /// <summary>
+    /// Equip an arrow into the drawing hand (from a quiver). Returns false if already holding one.
+    /// </summary>
+    public bool EquipArrow(ArrowProjectile newArrow)
+    {
+        if (newArrow == null || arrow != null)
+        {
+            return false;
+        }
+
+        if (!IsSceneInstance)
+        {
+            Debug.LogError(
+                "BowController.EquipArrow called on a Prefab asset. Assign the scene Recurve_Bow / BowController on ArrowQuiver.",
+                this);
+            return false;
+        }
+
+        if (!newArrow.gameObject.scene.IsValid())
+        {
+            Debug.LogError("BowController.EquipArrow: arrow is not a scene instance.", this);
+            return false;
+        }
+
+        bool isDesktop = PlayEnvironment.IsDesktopInput;
+        desktop = isDesktop;
+        arrow = newArrow;
+
+        if (isDesktop)
+        {
+            ApplyDesktopPose();
+            if (logInputDetection)
+            {
+                Transform anchor = ResolveDesktopAnchor();
+                Debug.Log(
+                    "Bow: desktop equipped arrow. anchor="
+                    + (anchor != null ? GetPath(anchor) : "null"),
+                    this);
+            }
+        }
+        else
+        {
+            FindRightHand();
+            if (idleArrowOnRightHand && rightHand != null)
+            {
+                UpdateIdleArrowVisual();
+            }
+            else if (arrowRest != null)
+            {
+                arrow.Nock(arrowRest);
+            }
+
+            if (logInputDetection)
+            {
+                Debug.Log("Bow: tracked equipped arrow.", this);
+            }
+        }
+
+        UpdateWandRayVisibility();
+        return true;
+    }
+
+    private void SpawnArrow()
+    {
+        if (UsesQuiver || arrow != null || arrowPrefab == null)
+        {
+            return;
+        }
+
+        arrow = Instantiate(arrowPrefab);
+        if (desktop)
+        {
+            ApplyDesktopPose();
+        }
+        else
+        {
+            Transform parent = arrowRest != null ? arrowRest : transform;
+            arrow.Nock(parent);
+        }
     }
 
     private void FindRightHand()
@@ -499,36 +897,23 @@ public class BowController : MonoBehaviour
 
     private Transform ResolveRightHandTransform()
     {
-        Transform byName = FindByName(rightHandName);
-        if (byName != null)
+        // Prefer explicit right-hand entity. Do NOT fall back to generic "Hand"
+        // (that is often the wand host and breaks quiver / nock distance checks).
+        Transform hand1 = FindByName(rightHandName)
+                          ?? FindByName("Hand1")
+                          ?? FindByName("hand1");
+        if (hand1 != null)
         {
-            return byName;
+            return hand1;
         }
 
-        byName = FindByName("Hand1") ?? FindByName("hand1") ?? FindByName("Hand");
-        if (byName != null)
-        {
-            return byName;
-        }
-
-        // Playtime hierarchy: vGear/Frame/User/Head/Hand
         Transform vGear = PlayEnvironment.ResolveVGearTransform();
         if (vGear != null)
         {
-            Transform byPath = FindChildPathIgnoreCase(vGear, "Frame", "User", "Head", "Hand");
+            Transform byPath = FindChildPathIgnoreCase(vGear, "Frame", "User", "Hand1");
             if (byPath != null)
             {
                 return byPath;
-            }
-
-            Transform head = FindChildRecursiveIgnoreCase(vGear, "Head");
-            if (head != null)
-            {
-                Transform handUnderHead = FindChildRecursiveIgnoreCase(head, "Hand");
-                if (handUnderHead != null)
-                {
-                    return handUnderHead;
-                }
             }
         }
 

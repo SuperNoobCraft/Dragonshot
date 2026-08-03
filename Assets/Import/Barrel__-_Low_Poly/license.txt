@@ -1,0 +1,11 @@
+Model Information:
+* title:	Barrel  - Low Poly
+* source:	https://sketchfab.com/3d-models/barrel-low-poly-15d280f41a034434bf01d6955ff093a7
+* author:	Badders (https://sketchfab.com/Badders)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Barrel  - Low Poly" (https://sketchfab.com/3d-models/barrel-low-poly-15d280f41a034434bf01d6955ff093a7) by Badders (https://sketchfab.com/Badders) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

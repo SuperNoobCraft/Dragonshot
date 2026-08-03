@@ -196,14 +196,19 @@ public class ArrowProjectile : MonoBehaviour
         MakeKinematic();
     }
 
-    public void AttachTo(Transform parent)
+    public void PrepareHeld()
     {
         flying = false;
         ClearIgnore();
+        MakeKinematic();
+    }
+
+    public void AttachTo(Transform parent)
+    {
+        PrepareHeld();
         transform.SetParent(parent, false);
         transform.localPosition = restLocalPos;
         transform.localRotation = restLocalRot;
-        MakeKinematic();
     }
 
     public void Nock(Transform rest)
@@ -242,17 +247,26 @@ public class ArrowProjectile : MonoBehaviour
         }
         else
         {
+            temporarilyIgnored = null;
             clearIgnoreAt = Time.time;
+        }
+
+        if (body == null)
+        {
+            body = GetComponent<Rigidbody>();
         }
 
         body.isKinematic = false;
         body.detectCollisions = true;
         body.useGravity = true;
+        body.constraints = RigidbodyConstraints.None;
         body.velocity = direction * speed;
         body.angularVelocity = Vector3.zero;
+        body.WakeUp();
 
         flying = true;
         killTime = lifeSeconds > 0f ? Time.time + lifeSeconds : float.PositiveInfinity;
+        ArrowManager.Register(this);
     }
 
     private void MakeKinematic()
@@ -331,6 +345,7 @@ public class ArrowProjectile : MonoBehaviour
     private void OnDestroy()
     {
         ClearIgnore();
+        ArrowManager.Unregister(this);
     }
 
     private static Transform FindChildRecursive(Transform root, string childName)

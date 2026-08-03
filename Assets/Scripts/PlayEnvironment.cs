@@ -372,10 +372,16 @@ public class PlayEnvironment : MonoBehaviour
     }
 
     /// <summary>
-    /// Desktop bow hold parent: vGear/Frame/User/Head (falls back to vGear.head / vCast.head).
+    /// Desktop bow hold parent: prefer the live view camera, then Head.
     /// </summary>
     public static Transform ResolveDesktopBowParent()
     {
+        Camera cam = ResolveViewCamera();
+        if (cam != null)
+        {
+            return cam.transform;
+        }
+
         try
         {
             if (vGear.head != null)
