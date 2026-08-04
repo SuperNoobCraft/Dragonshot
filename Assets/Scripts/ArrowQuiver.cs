@@ -12,6 +12,8 @@ public class ArrowQuiver : MonoBehaviour
     [SerializeField] private ArrowProjectile arrowPrefab;
     [SerializeField] private BowController bow;
     [SerializeField, Min(1)] private int capacity = 3;
+    [Tooltip("Never run out — taking an arrow does not reduce remaining count.")]
+    [SerializeField] private bool infiniteArrows;
     [Tooltip("Optional visuals in the quiver; disabled one-by-one as arrows are taken.")]
     [SerializeField] private GameObject[] quiverArrowVisuals;
 
@@ -33,6 +35,19 @@ public class ArrowQuiver : MonoBehaviour
 
     public int Remaining => remaining;
     public int Capacity => capacity;
+    public bool InfiniteArrows
+    {
+        get => infiniteArrows;
+        set
+        {
+            infiniteArrows = value;
+            if (infiniteArrows)
+            {
+                remaining = capacity;
+                RefreshVisuals();
+            }
+        }
+    }
 
     private void Awake()
     {
@@ -158,11 +173,11 @@ public class ArrowQuiver : MonoBehaviour
     }
 
     /// <summary>
-    /// Empty barrel → refill. Otherwise give one arrow if the hand is free.
+    /// Empty barrel → refill (unless infinite). Otherwise give one arrow if the hand is free.
     /// </summary>
     private void TryInteract()
     {
-        if (remaining <= 0)
+        if (!infiniteArrows && remaining <= 0)
         {
             Refill();
             return;
@@ -180,13 +195,18 @@ public class ArrowQuiver : MonoBehaviour
     {
         bow = ResolveSceneBow(bow);
 
-        if (remaining <= 0 || arrowPrefab == null || bow == null || bow.HasArrowInHand)
+        if (arrowPrefab == null || bow == null || bow.HasArrowInHand)
         {
             if (bow == null)
             {
                 LogFail("no scene BowController found (prefab-only reference?).");
             }
 
+            return false;
+        }
+
+        if (!infiniteArrows && remaining <= 0)
+        {
             return false;
         }
 
@@ -205,12 +225,16 @@ public class ArrowQuiver : MonoBehaviour
             return false;
         }
 
-        remaining--;
-        RefreshVisuals();
+        if (!infiniteArrows)
+        {
+            remaining--;
+            RefreshVisuals();
+        }
 
         if (logPickup)
         {
-            Debug.Log($"Quiver: picked up arrow ({remaining}/{capacity} left).", this);
+            string left = infiniteArrows ? "∞" : remaining + "/" + capacity;
+            Debug.Log($"Quiver: picked up arrow ({left} left).", this);
         }
 
         return true;

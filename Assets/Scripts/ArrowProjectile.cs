@@ -18,23 +18,39 @@ public class ArrowProjectile : MonoBehaviour
     [Tooltip("Used only when tip/rear markers are missing.")]
     [SerializeField] private Vector3 tipAimEuler = new Vector3(0f, -90f, 0f);
 
+    [Header("Flight")]
+    [Tooltip("Keep the tip pointed along velocity so the shaft follows the ballistic arc.")]
+    [SerializeField] private bool alignToVelocity = true;
+    [Tooltip("Ignore tiny velocities (m/s) to avoid jitter near the apex / landing.")]
+    [SerializeField, Min(0.01f)] private float alignMinSpeed = 0.5f;
+    [Tooltip("0 = snap to velocity each physics step; higher = smoother (less snappy).")]
+    [SerializeField, Range(0f, 30f)] private float alignSmoothing = 12f;
+
     [Header("Impact")]
     [SerializeField] private bool stickOnHit = true;
+    [Tooltip("Layers that stop and pin the arrow. Leave empty to stick on any layer.")]
     [SerializeField] private LayerMask stickLayers;
     [SerializeField] private float lifeSeconds = 12f;
+    [Tooltip("If true, arrow stays in world space when stuck (avoids ground scale twisting the shaft).")]
+    [SerializeField] private bool stickInWorldSpace = true;
 
     private Rigidbody body;
     private Collider[] selfColliders;
     private Vector3 restLocalPos;
     private Quaternion restLocalRot;
     private bool flying;
+    private bool stuck;
     private float killTime;
     private float clearIgnoreAt;
     private Collider[] temporarilyIgnored;
     private Vector3 shaftLocalDir = Vector3.forward;
+    private Vector3 lastAirVelocity = Vector3.forward;
+    private Quaternion stuckRotation = Quaternion.identity;
 
     public Transform Tip => arrowTip;
     public Transform Rear => arrowRear;
+    public bool IsInFlight => flying;
+    public bool HasStuck => stuck;
     public float ShaftLength
     {
         get
@@ -117,6 +133,18 @@ public class ArrowProjectile : MonoBehaviour
 
     private void Update()
     {
+        if (stuck)
+        {
+            // Re-assert pose in case parenting / physics touched it.
+            transform.rotation = stuckRotation;
+            if (body != null && body.isKinematic)
+            {
+                body.rotation = stuckRotation;
+            }
+
+            return;
+        }
+
         if (!flying)
         {
             return;
@@ -132,6 +160,44 @@ public class ArrowProjectile : MonoBehaviour
         {
             Destroy(gameObject);
         }
+    }
+
+    private void FixedUpdate()
+    {
+        if (!flying || stuck || body == null || body.isKinematic)
+        {
+            return;
+        }
+
+        Vector3 velocity = body.velocity;
+        float speedSqr = velocity.sqrMagnitude;
+        float minSqr = alignMinSpeed * alignMinSpeed;
+        if (speedSqr < minSqr)
+        {
+            return;
+        }
+
+        // Cache free-flight velocity only — once we scrape the ground, velocity
+        // goes nearly horizontal and would bake a flat stick pose.
+        lastAirVelocity = velocity;
+
+        if (!alignToVelocity)
+        {
+            return;
+        }
+
+        Quaternion target = RotationForDirection(velocity);
+        if (alignSmoothing <= 0.01f)
+        {
+            body.MoveRotation(target);
+        }
+        else
+        {
+            float t = 1f - Mathf.Exp(-alignSmoothing * Time.fixedDeltaTime);
+            body.MoveRotation(Quaternion.Slerp(body.rotation, target, t));
+        }
+
+        body.angularVelocity = Vector3.zero;
     }
 
     /// <summary>
@@ -199,6 +265,7 @@ public class ArrowProjectile : MonoBehaviour
     public void PrepareHeld()
     {
         flying = false;
+        stuck = false;
         ClearIgnore();
         MakeKinematic();
     }
@@ -260,10 +327,15 @@ public class ArrowProjectile : MonoBehaviour
         body.detectCollisions = true;
         body.useGravity = true;
         body.constraints = RigidbodyConstraints.None;
+        // Rotation is driven to follow velocity; freeze random physics spin.
+        body.freezeRotation = alignToVelocity;
+        body.interpolation = RigidbodyInterpolation.Interpolate;
         body.velocity = direction * speed;
         body.angularVelocity = Vector3.zero;
         body.WakeUp();
 
+        lastAirVelocity = direction * speed;
+        stuck = false;
         flying = true;
         killTime = lifeSeconds > 0f ? Time.time + lifeSeconds : float.PositiveInfinity;
         ArrowManager.Register(this);
@@ -274,6 +346,7 @@ public class ArrowProjectile : MonoBehaviour
         body.isKinematic = true;
         body.detectCollisions = false;
         body.useGravity = false;
+        body.freezeRotation = false;
         body.velocity = Vector3.zero;
         body.angularVelocity = Vector3.zero;
     }
@@ -317,7 +390,7 @@ public class ArrowProjectile : MonoBehaviour
 
     private void OnCollisionEnter(Collision collision)
     {
-        if (!flying || !stickOnHit)
+        if (!flying || stuck || !stickOnHit)
         {
             return;
         }
@@ -327,19 +400,83 @@ public class ArrowProjectile : MonoBehaviour
             return;
         }
 
-        if (((1 << collision.gameObject.layer) & stickLayers) == 0)
+        if (!IsStickLayer(collision.gameObject.layer))
         {
             return;
         }
 
+        Stick(collision);
+    }
+
+    private bool IsStickLayer(int layer)
+    {
+        // Empty mask = stick to anything.
+        if (stickLayers.value == 0)
+        {
+            return true;
+        }
+
+        return ((1 << layer) & stickLayers) != 0;
+    }
+
+    private void Stick(Collision collision)
+    {
+        // Incident direction from last free-flight sample (pre-scrape), not the
+        // post-contact horizontal velocity that makes the shaft look flat.
+        Vector3 impactDir = lastAirVelocity;
+        if (impactDir.sqrMagnitude < 1e-4f && collision != null)
+        {
+            impactDir = collision.relativeVelocity;
+        }
+
+        if (impactDir.sqrMagnitude < 1e-4f)
+        {
+            impactDir = TipWorldDirection;
+        }
+
+        impactDir.Normalize();
+
+        Quaternion impactRotation = RotationForDirection(impactDir);
+        stuckRotation = impactRotation;
+
         flying = false;
+        stuck = true;
         ClearIgnore();
 
-        body.isKinematic = true;
-        body.detectCollisions = false;
+        if (body == null)
+        {
+            body = GetComponent<Rigidbody>();
+        }
+
+        body.interpolation = RigidbodyInterpolation.None;
         body.velocity = Vector3.zero;
         body.angularVelocity = Vector3.zero;
-        transform.SetParent(collision.transform, true);
+        body.detectCollisions = false;
+        body.freezeRotation = true;
+        body.isKinematic = true;
+
+        Vector3 impactPosition = body.position;
+        transform.SetParent(null, true);
+        transform.SetPositionAndRotation(impactPosition, impactRotation);
+
+        // After rotation is correct, slide so the tip sits on the contact point.
+        if (collision != null && collision.contactCount > 0 && arrowTip != null)
+        {
+            ContactPoint contact = collision.GetContact(0);
+            impactPosition += contact.point - arrowTip.position;
+            transform.position = impactPosition;
+        }
+
+        body.position = transform.position;
+        body.rotation = impactRotation;
+
+        if (!stickInWorldSpace && collision != null)
+        {
+            transform.SetParent(collision.transform, true);
+            transform.SetPositionAndRotation(impactPosition, impactRotation);
+            body.position = impactPosition;
+            body.rotation = impactRotation;
+        }
     }
 
     private void OnDestroy()
