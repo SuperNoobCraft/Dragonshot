@@ -8,10 +8,22 @@ public enum ArrowSupplyMode
 }
 
 /// <summary>
+/// CAVE aim styles to A/B test.
+/// BowOnly = Wii-style (bow aims, string only draws).
+/// FreeShaft = classic VR (aim along rest → string hand).
+/// SoftCoupled = bow primary, string offset gently steers.
+/// </summary>
+public enum BowAimMode
+{
+    BowOnly,
+    FreeShaft,
+    SoftCoupled
+}
+
+/// <summary>
 /// Desktop PC: bow + held arrow follow vCast Head (mouse look) in world space each LateUpdate.
 /// Hold RMB to draw, release to shoot along look forward.
-/// Tracked XR: bow on left hand; pull distance (hand separation) sets power;
-/// aim follows the bow (left hand) only — string hand does not steer the arrow.
+/// Tracked XR: bow on left hand; pull distance sets power; aim mode is configurable.
 /// </summary>
 [DefaultExecutionOrder(1000)]
 public class BowController : MonoBehaviour
@@ -29,6 +41,8 @@ public class BowController : MonoBehaviour
     [SerializeField] private ArrowSupplyMode supplyMode = ArrowSupplyMode.FromBarrel;
 
     [Header("Shot")]
+    [Tooltip("HP removed from the dragon per arrow hit.")]
+    [SerializeField, Min(1)] private int damagePerShot = 1;
     [Tooltip("Weak / flop release (m/s). Real bows flop much softer than full draw.")]
     [SerializeField] private float minSpeed = 8f;
     [Tooltip("Full-draw launch speed (m/s). Olympic recurve ≈ 55–60 m/s; room-scale demos "
@@ -73,6 +87,10 @@ public class BowController : MonoBehaviour
     [Tooltip("Extra pitch (degrees) applied to CAVE aim. Negative = tip slightly down "
              + "(compensates grip so a 'level' hold does not loft).")]
     [SerializeField] private float trackedAimPitchOffsetDegrees = -1.5f;
+    [Tooltip("CAVE aim style. Cycle at runtime via Aim Mode config label.")]
+    [SerializeField] private BowAimMode aimMode = BowAimMode.SoftCoupled;
+    [Tooltip("SoftCoupled only: 0 = pure bow aim, 1 = pure string-hand shaft aim.")]
+    [SerializeField, Range(0f, 1f)] private float softCoupleBlend = 0.3f;
     [Tooltip("Hide Votanic wand laser while an arrow is in hand (uses DisplayWandRay / EnableWandRay).")]
     [SerializeField] private bool hideWandRayWhileHoldingArrow = true;
 
@@ -152,6 +170,69 @@ public class BowController : MonoBehaviour
         Debug.Log("Created ArrowSupplyConfigLabel. Move it in the Scene view.", panel);
     }
 
+    /// <summary>
+    /// Places a world-space panel to cycle CAVE aim modes (Bow Only / Free Shaft / Soft Coupled).
+    /// </summary>
+    [ContextMenu("Create Aim Mode Config Label")]
+    public void CreateAimModeConfigLabel()
+    {
+        AimModeConfigLabel existing = FindObjectOfType<AimModeConfigLabel>();
+        if (existing != null)
+        {
+#if UNITY_EDITOR
+            UnityEditor.Selection.activeGameObject = existing.gameObject;
+#endif
+            Debug.Log("AimModeConfigLabel already exists — selected it.", existing);
+            return;
+        }
+
+        GameObject panel = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        panel.name = "AimModeConfigLabel";
+        panel.transform.position = transform.position + transform.right * -0.6f + Vector3.up * 0.3f;
+        Vector3 toPanel = panel.transform.position - transform.position;
+        if (toPanel.sqrMagnitude > 1e-6f)
+        {
+            panel.transform.rotation = Quaternion.LookRotation(toPanel.normalized);
+        }
+
+        panel.transform.localScale = new Vector3(0.95f, 0.55f, 1f);
+
+        Renderer renderer = panel.GetComponent<Renderer>();
+        if (renderer != null && renderer.sharedMaterial != null)
+        {
+            Material mat = new Material(renderer.sharedMaterial);
+            if (mat.HasProperty("_Color"))
+            {
+                mat.color = new Color(0.12f, 0.08f, 0.18f, 0.9f);
+            }
+            else if (mat.HasProperty("_BaseColor"))
+            {
+                mat.SetColor("_BaseColor", new Color(0.12f, 0.08f, 0.18f, 0.9f));
+            }
+
+            renderer.sharedMaterial = mat;
+        }
+
+        GameObject textGo = new GameObject("Label");
+        textGo.transform.SetParent(panel.transform, false);
+        textGo.transform.localPosition = new Vector3(0f, 0f, -0.01f);
+        TextMesh textMesh = textGo.AddComponent<TextMesh>();
+        textMesh.anchor = TextAnchor.MiddleCenter;
+        textMesh.alignment = TextAlignment.Center;
+        textMesh.characterSize = 0.055f;
+        textMesh.fontSize = 48;
+        textMesh.color = Color.white;
+
+        AimModeConfigLabel config = panel.AddComponent<AimModeConfigLabel>();
+        config.AssignBowAndLabel(this, textMesh);
+
+#if UNITY_EDITOR
+        UnityEditor.Selection.activeGameObject = panel;
+        UnityEditor.EditorUtility.SetDirty(panel);
+#endif
+        Debug.Log("Created AimModeConfigLabel. Move it in the Scene view.", panel);
+    }
+
     public bool HasArrowInHand => arrow != null;
 
     public ArrowSupplyMode SupplyMode => supplyMode;
@@ -179,6 +260,50 @@ public class BowController : MonoBehaviour
                 ? ArrowSupplyMode.FromBarrel
                 : ArrowSupplyMode.AlwaysReady);
         return supplyMode;
+    }
+
+    public BowAimMode AimMode => aimMode;
+
+    public float SoftCoupleBlend
+    {
+        get => softCoupleBlend;
+        set => softCoupleBlend = Mathf.Clamp01(value);
+    }
+
+    public void SetAimMode(BowAimMode mode)
+    {
+        if (aimMode == mode)
+        {
+            return;
+        }
+
+        aimMode = mode;
+        if (logInputDetection)
+        {
+            Debug.Log("BowController: aim mode = " + AimModeLabel(aimMode), this);
+        }
+    }
+
+    public BowAimMode CycleAimMode()
+    {
+        int next = ((int)aimMode + 1) % 3;
+        SetAimMode((BowAimMode)next);
+        return aimMode;
+    }
+
+    public static string AimModeLabel(BowAimMode mode)
+    {
+        switch (mode)
+        {
+            case BowAimMode.BowOnly:
+                return "Bow Only (Wii)";
+            case BowAimMode.FreeShaft:
+                return "Free Shaft (VR)";
+            case BowAimMode.SoftCoupled:
+                return "Soft Coupled";
+            default:
+                return mode.ToString();
+        }
     }
 
     private void ApplySupplyMode()
@@ -723,7 +848,7 @@ public class BowController : MonoBehaviour
             Debug.Log($"Bow: shot draw={power:0.00} speed={speed:0.0} dir={dir}.", this);
         }
 
-        shot.Fire(dir, speed, bowColliders);
+        shot.Fire(dir, speed, damagePerShot, bowColliders);
         ResetBowString();
 
         if (ShouldAutoSpawnHeldArrow)
@@ -749,11 +874,11 @@ public class BowController : MonoBehaviour
 
     private Vector3 ShotDirectionTracked()
     {
-        return BowAimDirection();
+        return ResolveTrackedAimDirection();
     }
 
     /// <summary>
-    /// CAVE aim is locked to the bow (left hand) model axis — not Transform.forward (+Z).
+    /// CAVE aim from bow model local axis (default −Y), plus optional pitch trim.
     /// </summary>
     private Vector3 BowAimDirection()
     {
@@ -777,7 +902,6 @@ public class BowController : MonoBehaviour
                 yawAxis = transform.right;
             }
 
-            // Pitch tip down/up around the shaft's horizontal perpendicular.
             Vector3 pitchAxis = Vector3.Cross(yawAxis.normalized, world);
             if (pitchAxis.sqrMagnitude > 1e-6f)
             {
@@ -786,6 +910,53 @@ public class BowController : MonoBehaviour
         }
 
         return world.normalized;
+    }
+
+    /// <summary>
+    /// String-hand shaft aim: tip toward bow rest from the drawing hand.
+    /// </summary>
+    private bool TryGetShaftAimDirection(out Vector3 aim)
+    {
+        aim = Vector3.forward;
+        if (rightHand == null)
+        {
+            return false;
+        }
+
+        Vector3 d = GetArrowRestPosition() - rightHand.position;
+        if (d.sqrMagnitude < 1e-6f)
+        {
+            return false;
+        }
+
+        aim = d.normalized;
+        return true;
+    }
+
+    /// <summary>
+    /// Final CAVE aim based on <see cref="aimMode"/>.
+    /// </summary>
+    private Vector3 ResolveTrackedAimDirection()
+    {
+        Vector3 bowAim = BowAimDirection();
+
+        if (aimMode == BowAimMode.BowOnly)
+        {
+            return bowAim;
+        }
+
+        if (!TryGetShaftAimDirection(out Vector3 shaftAim))
+        {
+            return bowAim;
+        }
+
+        if (aimMode == BowAimMode.FreeShaft)
+        {
+            return shaftAim;
+        }
+
+        // SoftCoupled: mostly bow, string offset steers a little.
+        return Vector3.Slerp(bowAim, shaftAim, softCoupleBlend).normalized;
     }
 
     private float SpeedFromDraw(float draw01)
@@ -897,8 +1068,7 @@ public class BowController : MonoBehaviour
             return;
         }
 
-        // Aim locked to bow; right hand only drives draw amount (already in `draw`).
-        Vector3 aim = BowAimDirection();
+        Vector3 aim = ResolveTrackedAimDirection();
         Vector3 restPos = GetArrowRestPosition();
 
         float fullPull = maxDrawDistance;
@@ -908,7 +1078,22 @@ public class BowController : MonoBehaviour
         }
 
         float pull = fullPull * Mathf.Clamp01(draw);
-        Vector3 rearPos = restPos - aim * pull;
+        Vector3 rearPos;
+
+        if (aimMode == BowAimMode.FreeShaft)
+        {
+            // Nock follows the string hand; tip points along rest ← hand.
+            rearPos = rightHand.position;
+            if (TryGetShaftAimDirection(out Vector3 shaftAim))
+            {
+                aim = shaftAim;
+            }
+        }
+        else
+        {
+            // BowOnly / SoftCoupled: keep shaft on the resolved aim axis; power from hand distance.
+            rearPos = restPos - aim * pull;
+        }
 
         arrow.PlaceRearAt(rearPos, aim);
         UpdateBowString(arrow.Rear != null ? arrow.Rear.position : rearPos);

@@ -25,6 +25,13 @@ public class TargetPracticeGame : MonoBehaviour
     [Header("Round")]
     [SerializeField] private float roundSeconds = 20f;
     [SerializeField, Min(1)] private int maxTargetsAtOnce = 3;
+    [Tooltip("How many next-target ghosts to show while solid targets are active. "
+             + "Lets players pre-aim before the current target is cleared.")]
+    [SerializeField, Min(0)] private int previewTargetCount = 1;
+    [Tooltip("Color for live / hittable targets.")]
+    [SerializeField] private Color activeTargetColor = new Color(0.85f, 0.15f, 0.15f, 1f);
+    [Tooltip("Color for next-target ghosts (not hittable until promoted).")]
+    [SerializeField] private Color previewTargetColor = new Color(0.2f, 0.75f, 1f, 1f);
     [Tooltip("Random multiplier applied on top of the target prefab's scale. "
              + "Use (1,1) to keep the prefab at exactly the size you authored (e.g. 3,3,3). "
              + "Only used as absolute size when no prefab is set (built-in spheres).")]
@@ -41,10 +48,13 @@ public class TargetPracticeGame : MonoBehaviour
     private float timeRemaining;
     private int score;
     private readonly List<ArcheryTarget> liveTargets = new List<ArcheryTarget>(8);
+    private readonly List<ArcheryTarget> previewTargets = new List<ArcheryTarget>(8);
 
     public int Score => score;
     public float TimeRemaining => timeRemaining;
     public bool IsPlaying => phase == Phase.Playing;
+    public Color ActiveTargetColor => activeTargetColor;
+    public Color PreviewTargetColor => previewTargetColor;
 
     private void Awake()
     {
@@ -273,16 +283,50 @@ public class TargetPracticeGame : MonoBehaviour
         }
 
         liveTargets.RemoveAll(t => t == null);
-
-        while (liveTargets.Count < maxTargetsAtOnce)
-        {
-            SpawnTarget();
-        }
+        previewTargets.RemoveAll(t => t == null);
+        MaintainTargetCounts();
 
         if (timeRemaining <= 0f)
         {
             EndRound();
         }
+    }
+
+    private void MaintainTargetCounts()
+    {
+        // Promote ghost previews into solid targets first so their positions stay put.
+        while (liveTargets.Count < maxTargetsAtOnce && previewTargets.Count > 0)
+        {
+            PromotePreview();
+        }
+
+        while (liveTargets.Count < maxTargetsAtOnce)
+        {
+            SpawnTarget(preview: false);
+        }
+
+        while (previewTargets.Count < previewTargetCount)
+        {
+            SpawnTarget(preview: true);
+        }
+    }
+
+    private void PromotePreview()
+    {
+        if (previewTargets.Count == 0)
+        {
+            return;
+        }
+
+        ArcheryTarget next = previewTargets[0];
+        previewTargets.RemoveAt(0);
+        if (next == null)
+        {
+            return;
+        }
+
+        next.SetPreview(false);
+        liveTargets.Add(next);
     }
 
     private void EnterWaitingToStart()
@@ -328,10 +372,7 @@ public class TargetPracticeGame : MonoBehaviour
             ui.ShowTimer(timeRemaining, score);
         }
 
-        for (int i = 0; i < maxTargetsAtOnce; i++)
-        {
-            SpawnTarget();
-        }
+        MaintainTargetCounts();
     }
 
     public void NotifyTargetHit(ArcheryTarget target)
@@ -373,21 +414,28 @@ public class TargetPracticeGame : MonoBehaviour
     private void SpawnStarterTarget()
     {
         Bounds bounds = GetSpawnBounds();
-        ArcheryTarget target = CreateTargetAt(bounds.center, starter: true);
+        ArcheryTarget target = CreateTargetAt(bounds.center, starter: true, preview: false);
         ApplySpawnScale(target, starter: true);
         liveTargets.Add(target);
     }
 
-    private void SpawnTarget()
+    private void SpawnTarget(bool preview)
     {
         if (!TryRandomPointInSpawnArea(out Vector3 point))
         {
             return;
         }
 
-        ArcheryTarget target = CreateTargetAt(point, starter: false);
+        ArcheryTarget target = CreateTargetAt(point, starter: false, preview: preview);
         ApplySpawnScale(target, starter: false);
-        liveTargets.Add(target);
+        if (preview)
+        {
+            previewTargets.Add(target);
+        }
+        else
+        {
+            liveTargets.Add(target);
+        }
     }
 
     private void ApplySpawnScale(ArcheryTarget target, bool starter)
@@ -419,7 +467,7 @@ public class TargetPracticeGame : MonoBehaviour
         }
     }
 
-    private ArcheryTarget CreateTargetAt(Vector3 point, bool starter)
+    private ArcheryTarget CreateTargetAt(Vector3 point, bool starter, bool preview)
     {
         ArcheryTarget target;
         if (targetPrefab != null)
@@ -431,7 +479,7 @@ public class TargetPracticeGame : MonoBehaviour
             target = CreateDefaultTarget(point);
         }
 
-        target.Bind(this, starter);
+        target.Bind(this, starter, preview);
         return target;
     }
 
@@ -446,13 +494,14 @@ public class TargetPracticeGame : MonoBehaviour
         if (renderer != null)
         {
             Material mat = renderer.material;
+            Color color = activeTargetColor;
             if (mat.HasProperty("_Color"))
             {
-                mat.color = new Color(0.85f, 0.15f, 0.15f, 1f);
+                mat.color = color;
             }
             else if (mat.HasProperty("_BaseColor"))
             {
-                mat.SetColor("_BaseColor", new Color(0.85f, 0.15f, 0.15f, 1f));
+                mat.SetColor("_BaseColor", color);
             }
         }
 
@@ -517,6 +566,16 @@ public class TargetPracticeGame : MonoBehaviour
         }
 
         liveTargets.Clear();
+
+        for (int i = 0; i < previewTargets.Count; i++)
+        {
+            if (previewTargets[i] != null)
+            {
+                Destroy(previewTargets[i].gameObject);
+            }
+        }
+
+        previewTargets.Clear();
     }
 
     private static void ClearLooseArrows()

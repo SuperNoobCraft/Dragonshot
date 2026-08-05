@@ -25,13 +25,15 @@ public class ArrowProjectile : MonoBehaviour
     [SerializeField, Min(0.01f)] private float alignMinSpeed = 0.5f;
     [Tooltip("0 = snap to velocity each physics step; higher = smoother (less snappy).")]
     [SerializeField, Range(0f, 30f)] private float alignSmoothing = 12f;
-    [Tooltip("1 = Unity gravity (−9.81). 1.3–1.6 shortens the apex so room-scale shots feel less floaty "
-             + "without needing unrealistically slow launches.")]
-    [SerializeField, Min(0.1f)] private float gravityMultiplier = 1.35f;
+    [Tooltip("Gravity scale while in flight. 1 = Earth gravity (−9.81 m/s²). "
+             + "0.1 = very floaty; 1.35 = snappier arc for room-scale.")]
+    [SerializeField, Min(0f)] private float gravityMultiplier = 1.35f;
     [Tooltip("Light air drag (Rigidbody.drag). ~0.05–0.15 bleeds speed over distance.")]
     [SerializeField, Min(0f)] private float airDrag = 0.08f;
 
     [Header("Impact")]
+    [Tooltip("Damage applied when this arrow hits a dragon (set from BowController on fire).")]
+    [SerializeField, Min(1)] private int damage = 1;
     [SerializeField] private bool stickOnHit = true;
     [Tooltip("Layers that stop and pin the arrow. Leave empty to stick on any layer.")]
     [SerializeField] private LayerMask stickLayers;
@@ -39,8 +41,19 @@ public class ArrowProjectile : MonoBehaviour
     [Tooltip("If true, arrow stays in world space when stuck (avoids ground scale twisting the shaft).")]
     [SerializeField] private bool stickInWorldSpace = true;
 
+    [Header("Flight Trail")]
+    [Tooltip("Leave a visible path while the arrow is in the air (helps at distance).")]
+    [SerializeField] private bool showFlightTrail = true;
+    [SerializeField] private float trailTime = 0.85f;
+    [SerializeField] private float trailStartWidth = 0.035f;
+    [SerializeField] private float trailEndWidth = 0.005f;
+    [SerializeField] private Color trailStartColor = new Color(1f, 0.85f, 0.25f, 0.95f);
+    [SerializeField] private Color trailEndColor = new Color(1f, 0.45f, 0.05f, 0f);
+    [SerializeField, Min(0.001f)] private float trailMinVertexDistance = 0.04f;
+
     private Rigidbody body;
     private Collider[] selfColliders;
+    private TrailRenderer trail;
     private Vector3 restLocalPos;
     private Quaternion restLocalRot;
     private bool flying;
@@ -51,8 +64,24 @@ public class ArrowProjectile : MonoBehaviour
     private Vector3 shaftLocalDir = Vector3.forward;
     private Vector3 lastAirVelocity = Vector3.forward;
     private Quaternion stuckRotation = Quaternion.identity;
+    private bool dragonHitHandled;
+
+    /// <summary>
+    /// Prevents the same arrow from registering twice (arrow collider + dragon mesh relay).
+    /// </summary>
+    public bool TryHandleDragonHit()
+    {
+        if (dragonHitHandled)
+        {
+            return false;
+        }
+
+        dragonHitHandled = true;
+        return true;
+    }
 
     public Transform Tip => arrowTip;
+    public int Damage => damage;
     public Transform Rear => arrowRear;
     public bool IsInFlight => flying;
     public bool HasStuck => stuck;
@@ -96,6 +125,8 @@ public class ArrowProjectile : MonoBehaviour
         restLocalRot = transform.localRotation;
         ResolveMarkers();
         CacheShaftLocalDir();
+        EnsureTrail();
+        SetTrailEmitting(false, clear: true);
         MakeKinematic();
     }
 
@@ -174,10 +205,10 @@ public class ArrowProjectile : MonoBehaviour
             return;
         }
 
-        // Extra gravity beyond Physics.gravity (useGravity already applies 1×).
-        if (gravityMultiplier > 1.001f)
+        // Apply scaled gravity ourselves — Rigidbody.useGravity is always 1× and ignores this field.
+        if (gravityMultiplier > 0f)
         {
-            body.AddForce(Physics.gravity * (gravityMultiplier - 1f), ForceMode.Acceleration);
+            body.AddForce(Physics.gravity * gravityMultiplier, ForceMode.Acceleration);
         }
 
         Vector3 velocity = body.velocity;
@@ -277,7 +308,9 @@ public class ArrowProjectile : MonoBehaviour
     {
         flying = false;
         stuck = false;
+        dragonHitHandled = false;
         ClearIgnore();
+        SetTrailEmitting(false, clear: true);
         MakeKinematic();
     }
 
@@ -308,11 +341,18 @@ public class ArrowProjectile : MonoBehaviour
 
     public void Fire(Vector3 direction, float speed, Collider[] ignore = null, float ignoreFor = 0.35f)
     {
+        Fire(direction, speed, damage, ignore, ignoreFor);
+    }
+
+    public void Fire(Vector3 direction, float speed, int shotDamage, Collider[] ignore = null, float ignoreFor = 0.35f)
+    {
         if (direction.sqrMagnitude < 1e-6f)
         {
             direction = TipWorldDirection;
         }
 
+        damage = Mathf.Max(1, shotDamage);
+        dragonHitHandled = false;
         direction.Normalize();
         transform.SetParent(null, true);
         transform.rotation = RotationForDirection(direction);
@@ -336,7 +376,7 @@ public class ArrowProjectile : MonoBehaviour
 
         body.isKinematic = false;
         body.detectCollisions = true;
-        body.useGravity = true;
+        body.useGravity = false;
         body.constraints = RigidbodyConstraints.None;
         // Rotation is driven to follow velocity; freeze random physics spin.
         body.freezeRotation = alignToVelocity;
@@ -351,6 +391,7 @@ public class ArrowProjectile : MonoBehaviour
         stuck = false;
         flying = true;
         killTime = lifeSeconds > 0f ? Time.time + lifeSeconds : float.PositiveInfinity;
+        SetTrailEmitting(showFlightTrail, clear: true);
         ArrowManager.Register(this);
     }
 
@@ -404,12 +445,22 @@ public class ArrowProjectile : MonoBehaviour
 
     private void OnCollisionEnter(Collision collision)
     {
-        if (!flying || stuck || !stickOnHit)
+        if (!flying || stuck)
         {
             return;
         }
 
         if (Time.time < clearIgnoreAt)
+        {
+            return;
+        }
+
+        if (TryHandleDragonHit(collision))
+        {
+            return;
+        }
+
+        if (!stickOnHit)
         {
             return;
         }
@@ -420,6 +471,22 @@ public class ArrowProjectile : MonoBehaviour
         }
 
         Stick(collision);
+    }
+
+    private bool TryHandleDragonHit(Collision collision)
+    {
+        if (collision == null)
+        {
+            return false;
+        }
+
+        DragonBoss dragon = collision.collider.GetComponentInParent<DragonBoss>();
+        if (dragon == null)
+        {
+            return false;
+        }
+
+        return dragon.HandleArrowCollision(this);
     }
 
     private bool IsStickLayer(int layer)
@@ -456,6 +523,8 @@ public class ArrowProjectile : MonoBehaviour
         flying = false;
         stuck = true;
         ClearIgnore();
+        // Stop drawing new segments; existing trail fades out via trailTime.
+        SetTrailEmitting(false, clear: false);
 
         if (body == null)
         {
@@ -497,6 +566,105 @@ public class ArrowProjectile : MonoBehaviour
     {
         ClearIgnore();
         ArrowManager.Unregister(this);
+    }
+
+    private void EnsureTrail()
+    {
+        trail = GetComponent<TrailRenderer>();
+        if (trail == null)
+        {
+            trail = gameObject.AddComponent<TrailRenderer>();
+        }
+
+        trail.time = trailTime;
+        trail.startWidth = trailStartWidth;
+        trail.endWidth = trailEndWidth;
+        trail.minVertexDistance = trailMinVertexDistance;
+        trail.autodestruct = false;
+        trail.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        trail.receiveShadows = false;
+        trail.numCapVertices = 2;
+        trail.numCornerVertices = 2;
+        trail.alignment = LineAlignment.View;
+        trail.textureMode = LineTextureMode.Stretch;
+
+        Gradient gradient = new Gradient();
+        gradient.SetKeys(
+            new[]
+            {
+                new GradientColorKey(trailStartColor, 0f),
+                new GradientColorKey(trailEndColor, 1f)
+            },
+            new[]
+            {
+                new GradientAlphaKey(trailStartColor.a, 0f),
+                new GradientAlphaKey(trailEndColor.a, 1f)
+            });
+        trail.colorGradient = gradient;
+
+        if (trail.sharedMaterial == null)
+        {
+            trail.sharedMaterial = CreateTrailMaterial();
+        }
+    }
+
+    private static Material CreateTrailMaterial()
+    {
+        string[] shaderNames =
+        {
+            "Sprites/Default",
+            "Unlit/Color",
+            "Universal Render Pipeline/Unlit",
+            "Particles/Standard Unlit",
+            "Legacy Shaders/Particles/Alpha Blended Premultiply"
+        };
+
+        for (int i = 0; i < shaderNames.Length; i++)
+        {
+            Shader shader = Shader.Find(shaderNames[i]);
+            if (shader != null)
+            {
+                Material mat = new Material(shader);
+                mat.name = "ArrowFlightTrail";
+                if (mat.HasProperty("_Color"))
+                {
+                    mat.color = Color.white;
+                }
+
+                return mat;
+            }
+        }
+
+        return new Material(Shader.Find("Hidden/InternalErrorShader"));
+    }
+
+    private void SetTrailEmitting(bool emitting, bool clear)
+    {
+        if (!showFlightTrail && emitting)
+        {
+            emitting = false;
+        }
+
+        if (trail == null)
+        {
+            if (!emitting && !clear)
+            {
+                return;
+            }
+
+            EnsureTrail();
+        }
+
+        if (trail == null)
+        {
+            return;
+        }
+
+        trail.emitting = emitting;
+        if (clear)
+        {
+            trail.Clear();
+        }
     }
 
     private static Transform FindChildRecursive(Transform root, string childName)
