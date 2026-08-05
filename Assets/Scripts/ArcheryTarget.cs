@@ -7,11 +7,15 @@ public class ArcheryTarget : MonoBehaviour
 {
     private TargetPracticeGame game;
     private bool claimed;
+    private bool isStarter;
 
-    public void Bind(TargetPracticeGame owner)
+    public bool IsStarter => isStarter;
+
+    public void Bind(TargetPracticeGame owner, bool starter = false)
     {
         game = owner;
         claimed = false;
+        isStarter = starter;
     }
 
     private void OnCollisionEnter(Collision collision)
@@ -39,7 +43,6 @@ public class ArcheryTarget : MonoBehaviour
 
         claimed = true;
 
-        // Arrow is usually stuck in world space — remove it with the target so it doesn't float.
         if (arrow != null)
         {
             Destroy(arrow.gameObject);

@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -8,7 +9,7 @@ public class TargetPracticeGame : MonoBehaviour
 {
     private enum Phase
     {
-        Idle,
+        WaitingToStart,
         Playing,
         Results
     }
@@ -24,14 +25,19 @@ public class TargetPracticeGame : MonoBehaviour
     [Header("Round")]
     [SerializeField] private float roundSeconds = 20f;
     [SerializeField, Min(1)] private int maxTargetsAtOnce = 3;
-    [SerializeField] private Vector2 targetScaleRange = new Vector2(0.35f, 0.55f);
+    [Tooltip("Random multiplier applied on top of the target prefab's scale. "
+             + "Use (1,1) to keep the prefab at exactly the size you authored (e.g. 3,3,3). "
+             + "Only used as absolute size when no prefab is set (built-in spheres).")]
+    [SerializeField] private Vector2 targetScaleRange = new Vector2(1f, 1f);
     [SerializeField] private bool enableInfiniteArrowsDuringGame = true;
     [SerializeField] private bool clearFlyingArrowsOnRoundEnd = true;
+    [Tooltip("After a round ends, wait this long showing only the score before the retry target/text appear.")]
+    [SerializeField, Min(0f)] private float retryPromptDelay = 1f;
 
     [Header("Gizmo")]
     [SerializeField] private Color gizmoColor = new Color(0.2f, 0.8f, 1f, 0.25f);
 
-    private Phase phase = Phase.Idle;
+    private Phase phase = Phase.WaitingToStart;
     private float timeRemaining;
     private int score;
     private readonly List<ArcheryTarget> liveTargets = new List<ArcheryTarget>(8);
@@ -101,7 +107,7 @@ public class TargetPracticeGame : MonoBehaviour
             ui.Bind(this);
         }
 
-        phase = Phase.Idle;
+        EnterWaitingToStart();
     }
 
     /// <summary>
@@ -177,7 +183,7 @@ public class TargetPracticeGame : MonoBehaviour
             textGo.transform.localScale = Vector3.one;
 
             TextMesh textMesh = textGo.AddComponent<TextMesh>();
-            textMesh.text = "Click to Start";
+            textMesh.text = "Shoot the center\ntarget to start";
             textMesh.anchor = TextAnchor.MiddleCenter;
             textMesh.alignment = TextAlignment.Center;
             textMesh.characterSize = 0.08f;
@@ -213,8 +219,8 @@ public class TargetPracticeGame : MonoBehaviour
         phase = Phase.Results;
         timeRemaining = 0f;
         ClearTargets();
+        StopAllCoroutines();
 
-        // Keep infinite arrows for the whole target-test session.
         if (quiver != null && enableInfiniteArrowsDuringGame)
         {
             quiver.InfiniteArrows = true;
@@ -227,8 +233,30 @@ public class TargetPracticeGame : MonoBehaviour
 
         if (ui != null)
         {
-            ui.ShowResults(score);
+            ui.ShowResults(score, showRetryPrompt: false);
         }
+
+        StartCoroutine(ShowRetryAfterDelay());
+    }
+
+    private IEnumerator ShowRetryAfterDelay()
+    {
+        if (retryPromptDelay > 0f)
+        {
+            yield return new WaitForSeconds(retryPromptDelay);
+        }
+
+        if (phase != Phase.Results)
+        {
+            yield break;
+        }
+
+        if (ui != null)
+        {
+            ui.ShowResults(score, showRetryPrompt: true);
+        }
+
+        SpawnStarterTarget();
     }
 
     private void Update()
@@ -257,15 +285,36 @@ public class TargetPracticeGame : MonoBehaviour
         }
     }
 
-    public void StartRound()
+    private void EnterWaitingToStart()
+    {
+        phase = Phase.WaitingToStart;
+        score = 0;
+        timeRemaining = 0f;
+        ClearTargets();
+
+        if (quiver != null && enableInfiniteArrowsDuringGame)
+        {
+            quiver.InfiniteArrows = true;
+        }
+
+        if (ui != null)
+        {
+            ui.ShowStart();
+        }
+
+        SpawnStarterTarget();
+    }
+
+    private void StartRoundFromStarterHit()
     {
         if (phase == Phase.Playing)
         {
             return;
         }
 
+        StopAllCoroutines();
         ClearTargets();
-        score = 0;
+        score = 1;
         timeRemaining = roundSeconds;
         phase = Phase.Playing;
 
@@ -287,13 +336,27 @@ public class TargetPracticeGame : MonoBehaviour
 
     public void NotifyTargetHit(ArcheryTarget target)
     {
-        if (phase != Phase.Playing || target == null)
+        if (target == null)
         {
-            if (target != null)
+            return;
+        }
+
+        if (target.IsStarter)
+        {
+            liveTargets.Remove(target);
+            Destroy(target.gameObject);
+
+            if (phase == Phase.WaitingToStart || phase == Phase.Results)
             {
-                Destroy(target.gameObject);
+                StartRoundFromStarterHit();
             }
 
+            return;
+        }
+
+        if (phase != Phase.Playing)
+        {
+            Destroy(target.gameObject);
             return;
         }
 
@@ -307,6 +370,14 @@ public class TargetPracticeGame : MonoBehaviour
         }
     }
 
+    private void SpawnStarterTarget()
+    {
+        Bounds bounds = GetSpawnBounds();
+        ArcheryTarget target = CreateTargetAt(bounds.center, starter: true);
+        ApplySpawnScale(target, starter: true);
+        liveTargets.Add(target);
+    }
+
     private void SpawnTarget()
     {
         if (!TryRandomPointInSpawnArea(out Vector3 point))
@@ -314,20 +385,54 @@ public class TargetPracticeGame : MonoBehaviour
             return;
         }
 
+        ArcheryTarget target = CreateTargetAt(point, starter: false);
+        ApplySpawnScale(target, starter: false);
+        liveTargets.Add(target);
+    }
+
+    private void ApplySpawnScale(ArcheryTarget target, bool starter)
+    {
+        if (target == null)
+        {
+            return;
+        }
+
+        // Prefab: keep authored scale, optionally multiply by range.
+        // No prefab (procedural sphere): treat range as absolute uniform scale.
+        Vector3 baseScale = targetPrefab != null
+            ? targetPrefab.transform.localScale
+            : Vector3.one;
+
+        float min = Mathf.Min(targetScaleRange.x, targetScaleRange.y);
+        float max = Mathf.Max(targetScaleRange.x, targetScaleRange.y);
+        float factor = starter ? max * 1.15f : Random.Range(min, max);
+
+        if (targetPrefab != null)
+        {
+            target.transform.localScale = baseScale * factor;
+        }
+        else
+        {
+            // Absolute size for built-in spheres (defaults were ~0.35–0.55 before).
+            float absolute = factor > 0.001f ? factor : 0.45f;
+            target.transform.localScale = Vector3.one * absolute;
+        }
+    }
+
+    private ArcheryTarget CreateTargetAt(Vector3 point, bool starter)
+    {
         ArcheryTarget target;
         if (targetPrefab != null)
         {
-            target = Instantiate(targetPrefab, point, Random.rotation, transform);
+            target = Instantiate(targetPrefab, point, starter ? Quaternion.identity : Random.rotation, transform);
         }
         else
         {
             target = CreateDefaultTarget(point);
         }
 
-        float scale = Random.Range(targetScaleRange.x, targetScaleRange.y);
-        target.transform.localScale = Vector3.one * scale;
-        target.Bind(this);
-        liveTargets.Add(target);
+        target.Bind(this, starter);
+        return target;
     }
 
     private ArcheryTarget CreateDefaultTarget(Vector3 point)
@@ -340,7 +445,6 @@ public class TargetPracticeGame : MonoBehaviour
         Renderer renderer = go.GetComponent<Renderer>();
         if (renderer != null)
         {
-            // Built-in / URP both accept a simple color via material property block when possible.
             Material mat = renderer.material;
             if (mat.HasProperty("_Color"))
             {
@@ -352,7 +456,6 @@ public class TargetPracticeGame : MonoBehaviour
             }
         }
 
-        // Ensure arrows can collide (not trigger-only).
         Collider col = go.GetComponent<Collider>();
         if (col != null)
         {

@@ -1,10 +1,17 @@
 using UnityEngine;
 using Votanic.vXR.vCast;
 
+public enum ArrowSupplyMode
+{
+    AlwaysReady,
+    FromBarrel
+}
+
 /// <summary>
 /// Desktop PC: bow + held arrow follow vCast Head (mouse look) in world space each LateUpdate.
 /// Hold RMB to draw, release to shoot along look forward.
-/// Tracked XR: bow on left hand, nock near right hand + axis, pull for power.
+/// Tracked XR: bow on left hand; pull distance (hand separation) sets power;
+/// aim follows the bow (left hand) only — string hand does not steer the arrow.
 /// </summary>
 [DefaultExecutionOrder(1000)]
 public class BowController : MonoBehaviour
@@ -14,14 +21,21 @@ public class BowController : MonoBehaviour
     [SerializeField] private Transform arrowRest;
     [Tooltip("Bow model string control (moves the string curve). Follows right hand / arrow rear while drawing.")]
     [SerializeField] private Transform bowString;
-    [Tooltip("If set (or found in scene), arrows come from the quiver instead of auto-spawning.")]
+    [Tooltip("If set (or found in scene), used when supply mode is From Barrel.")]
     [SerializeField] private ArrowQuiver quiver;
-    [Tooltip("When no quiver is used, keep a held arrow available automatically (desktop testing).")]
+    [Tooltip("When Always Ready, keep a held arrow available automatically after each shot.")]
     [SerializeField] private bool autoSpawnHeldArrow = true;
+    [Tooltip("Always Ready = arrow on hand without barrel. From Barrel = pick up from quiver.")]
+    [SerializeField] private ArrowSupplyMode supplyMode = ArrowSupplyMode.FromBarrel;
 
     [Header("Shot")]
-    [SerializeField] private float minSpeed = 2f;
-    [SerializeField] private float maxSpeed = 40f;
+    [Tooltip("Weak / flop release (m/s). Real bows flop much softer than full draw.")]
+    [SerializeField] private float minSpeed = 8f;
+    [Tooltip("Full-draw launch speed (m/s). Olympic recurve ≈ 55–60 m/s; room-scale demos "
+             + "read better around 22–30 so the arc is visible. 40+ feels laser-like with default gravity.")]
+    [SerializeField] private float maxSpeed = 26f;
+    [Tooltip("Shape of draw→speed. 1 = linear; >1 needs closer to full draw for top speed.")]
+    [SerializeField, Range(1f, 2.5f)] private float drawSpeedExponent = 1.35f;
     [Tooltip("Tracked: release below this draw cancels instead of firing. Keep low so a tiny pull still flop-fires.")]
     [SerializeField, Range(0f, 1f)] private float minDrawToShoot = 0.02f;
 
@@ -54,6 +68,11 @@ public class BowController : MonoBehaviour
     [SerializeField] private Vector3 rightHandArrowLocalPosition;
     [Tooltip("Idle arrow on right hand. (0,-90,0) matches imported tip-along-+X meshes.")]
     [SerializeField] private Vector3 rightHandArrowLocalEuler = new Vector3(0f, -90f, 0f);
+    [Tooltip("CAVE shot direction in bow-model local space. Recurve import aims along -Y.")]
+    [SerializeField] private Vector3 trackedAimLocalAxis = new Vector3(0f, -1f, 0f);
+    [Tooltip("Extra pitch (degrees) applied to CAVE aim. Negative = tip slightly down "
+             + "(compensates grip so a 'level' hold does not loft).")]
+    [SerializeField] private float trackedAimPitchOffsetDegrees = -1.5f;
     [Tooltip("Hide Votanic wand laser while an arrow is in hand (uses DisplayWandRay / EnableWandRay).")]
     [SerializeField] private bool hideWandRayWhileHoldingArrow = true;
 
@@ -74,7 +93,110 @@ public class BowController : MonoBehaviour
     private bool loggedDesktopHead;
     private bool rmbWasHeld;
 
+    /// <summary>
+    /// Places an editable world-space toggle panel near the bow.
+    /// </summary>
+    [ContextMenu("Create Arrow Supply Config Label")]
+    public void CreateArrowSupplyConfigLabel()
+    {
+        ArrowSupplyConfigLabel existing = FindObjectOfType<ArrowSupplyConfigLabel>();
+        if (existing != null)
+        {
+#if UNITY_EDITOR
+            UnityEditor.Selection.activeGameObject = existing.gameObject;
+#endif
+            Debug.Log("ArrowSupplyConfigLabel already exists — selected it.", existing);
+            return;
+        }
+
+        GameObject panel = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        panel.name = "ArrowSupplyConfigLabel";
+        panel.transform.position = transform.position + transform.right * 0.6f + Vector3.up * 0.3f;
+        panel.transform.rotation = Quaternion.LookRotation(
+            (panel.transform.position - transform.position).normalized);
+        panel.transform.localScale = new Vector3(0.9f, 0.55f, 1f);
+
+        Renderer renderer = panel.GetComponent<Renderer>();
+        if (renderer != null && renderer.sharedMaterial != null)
+        {
+            Material mat = new Material(renderer.sharedMaterial);
+            if (mat.HasProperty("_Color"))
+            {
+                mat.color = new Color(0.08f, 0.12f, 0.18f, 0.9f);
+            }
+            else if (mat.HasProperty("_BaseColor"))
+            {
+                mat.SetColor("_BaseColor", new Color(0.08f, 0.12f, 0.18f, 0.9f));
+            }
+
+            renderer.sharedMaterial = mat;
+        }
+
+        GameObject textGo = new GameObject("Label");
+        textGo.transform.SetParent(panel.transform, false);
+        textGo.transform.localPosition = new Vector3(0f, 0f, -0.01f);
+        TextMesh textMesh = textGo.AddComponent<TextMesh>();
+        textMesh.anchor = TextAnchor.MiddleCenter;
+        textMesh.alignment = TextAlignment.Center;
+        textMesh.characterSize = 0.06f;
+        textMesh.fontSize = 48;
+        textMesh.color = Color.white;
+
+        ArrowSupplyConfigLabel config = panel.AddComponent<ArrowSupplyConfigLabel>();
+        config.AssignBowAndLabel(this, textMesh);
+
+#if UNITY_EDITOR
+        UnityEditor.Selection.activeGameObject = panel;
+        UnityEditor.EditorUtility.SetDirty(panel);
+#endif
+        Debug.Log("Created ArrowSupplyConfigLabel. Move it in the Scene view.", panel);
+    }
+
     public bool HasArrowInHand => arrow != null;
+
+    public ArrowSupplyMode SupplyMode => supplyMode;
+
+    public bool IsAlwaysReadyMode => supplyMode == ArrowSupplyMode.AlwaysReady;
+
+    /// <summary>
+    /// Toggle or set whether arrows auto-appear on the hand, or must be taken from the barrel.
+    /// </summary>
+    public void SetSupplyMode(ArrowSupplyMode mode)
+    {
+        if (supplyMode == mode)
+        {
+            return;
+        }
+
+        supplyMode = mode;
+        ApplySupplyMode();
+    }
+
+    public ArrowSupplyMode ToggleSupplyMode()
+    {
+        SetSupplyMode(
+            supplyMode == ArrowSupplyMode.AlwaysReady
+                ? ArrowSupplyMode.FromBarrel
+                : ArrowSupplyMode.AlwaysReady);
+        return supplyMode;
+    }
+
+    private void ApplySupplyMode()
+    {
+        if (ShouldAutoSpawnHeldArrow && arrow == null)
+        {
+            SpawnArrow();
+        }
+
+        if (logInputDetection)
+        {
+            Debug.Log(
+                supplyMode == ArrowSupplyMode.AlwaysReady
+                    ? "BowController: arrow supply = Always Ready (auto on hand)."
+                    : "BowController: arrow supply = From Barrel (pick up from quiver).",
+                this);
+        }
+    }
 
     public Transform RightHandTransform
     {
@@ -99,7 +221,10 @@ public class BowController : MonoBehaviour
         }
     }
 
-    private bool UsesQuiver => quiver != null;
+    private bool UsesQuiver => supplyMode == ArrowSupplyMode.FromBarrel && quiver != null;
+
+    private bool ShouldAutoSpawnHeldArrow =>
+        supplyMode == ArrowSupplyMode.AlwaysReady && autoSpawnHeldArrow;
 
     private void Awake()
     {
@@ -125,7 +250,7 @@ public class BowController : MonoBehaviour
         bowColliders = GetComponentsInChildren<Collider>(true);
         CacheBowStringRest();
 
-        if (!UsesQuiver && autoSpawnHeldArrow)
+        if (ShouldAutoSpawnHeldArrow)
         {
             SpawnArrow();
         }
@@ -233,7 +358,7 @@ public class BowController : MonoBehaviour
             leftHandChild.FollowBoundHand();
         }
 
-        if (!UsesQuiver && autoSpawnHeldArrow)
+        if (ShouldAutoSpawnHeldArrow)
         {
             SpawnArrow();
         }
@@ -243,9 +368,7 @@ public class BowController : MonoBehaviour
             Debug.Log(
                 UsesQuiver
                     ? "BowController: CAVE mode — pick arrows from the quiver, then nock/pull/release."
-                    : "BowController: CAVE mode — hands within "
-                      + nockStartDistance.ToString("0.00")
-                      + "m + trigger to nock, then pull for power.",
+                    : "BowController: CAVE mode — always-ready arrow on hand; nock/pull/release.",
                 this);
         }
     }
@@ -517,7 +640,7 @@ public class BowController : MonoBehaviour
     {
         if (arrow == null)
         {
-            if (!UsesQuiver && autoSpawnHeldArrow)
+            if (ShouldAutoSpawnHeldArrow)
             {
                 SpawnArrow();
             }
@@ -584,7 +707,7 @@ public class BowController : MonoBehaviour
             power = Mathf.Max(power, 0.15f);
         }
 
-        float speed = Mathf.Lerp(minSpeed, maxSpeed, power);
+        float speed = SpeedFromDraw(power);
         ArrowProjectile shot = arrow;
         arrow = null;
 
@@ -603,7 +726,7 @@ public class BowController : MonoBehaviour
         shot.Fire(dir, speed, bowColliders);
         ResetBowString();
 
-        if (!UsesQuiver && autoSpawnHeldArrow)
+        if (ShouldAutoSpawnHeldArrow)
         {
             SpawnArrow();
         }
@@ -626,17 +749,54 @@ public class BowController : MonoBehaviour
 
     private Vector3 ShotDirectionTracked()
     {
-        Vector3 restPos = GetArrowRestPosition();
-        if (rightHand != null)
+        return BowAimDirection();
+    }
+
+    /// <summary>
+    /// CAVE aim is locked to the bow (left hand) model axis — not Transform.forward (+Z).
+    /// </summary>
+    private Vector3 BowAimDirection()
+    {
+        Vector3 local = trackedAimLocalAxis.sqrMagnitude > 1e-8f
+            ? trackedAimLocalAxis.normalized
+            : Vector3.down;
+
+        Vector3 world = transform.TransformDirection(local);
+        if (world.sqrMagnitude < 1e-6f)
         {
-            Vector3 d = restPos - rightHand.position;
-            if (d.sqrMagnitude > 0.0001f)
+            return Vector3.forward;
+        }
+
+        world.Normalize();
+
+        if (Mathf.Abs(trackedAimPitchOffsetDegrees) > 0.01f)
+        {
+            Vector3 yawAxis = Vector3.Cross(world, Vector3.up);
+            if (yawAxis.sqrMagnitude < 1e-6f)
             {
-                return d.normalized;
+                yawAxis = transform.right;
+            }
+
+            // Pitch tip down/up around the shaft's horizontal perpendicular.
+            Vector3 pitchAxis = Vector3.Cross(yawAxis.normalized, world);
+            if (pitchAxis.sqrMagnitude > 1e-6f)
+            {
+                world = Quaternion.AngleAxis(trackedAimPitchOffsetDegrees, pitchAxis.normalized) * world;
             }
         }
 
-        return transform.forward;
+        return world.normalized;
+    }
+
+    private float SpeedFromDraw(float draw01)
+    {
+        float t = Mathf.Clamp01(draw01);
+        if (drawSpeedExponent > 1.001f)
+        {
+            t = Mathf.Pow(t, drawSpeedExponent);
+        }
+
+        return Mathf.Lerp(minSpeed, maxSpeed, t);
     }
 
     private Vector3 GetArrowRestPosition()
@@ -737,12 +897,20 @@ public class BowController : MonoBehaviour
             return;
         }
 
+        // Aim locked to bow; right hand only drives draw amount (already in `draw`).
+        Vector3 aim = BowAimDirection();
         Vector3 restPos = GetArrowRestPosition();
-        Vector3 rearPos = rightHand.position;
-        Vector3 toRest = restPos - rearPos;
-        Vector3 dir = toRest.sqrMagnitude > 0.0001f ? toRest.normalized : transform.forward;
 
-        arrow.PlaceRearAt(rearPos, dir);
+        float fullPull = maxDrawDistance;
+        if (arrow != null)
+        {
+            fullPull = Mathf.Max(maxDrawDistance, arrow.ShaftLength);
+        }
+
+        float pull = fullPull * Mathf.Clamp01(draw);
+        Vector3 rearPos = restPos - aim * pull;
+
+        arrow.PlaceRearAt(rearPos, aim);
         UpdateBowString(arrow.Rear != null ? arrow.Rear.position : rearPos);
     }
 

@@ -25,6 +25,11 @@ public class ArrowProjectile : MonoBehaviour
     [SerializeField, Min(0.01f)] private float alignMinSpeed = 0.5f;
     [Tooltip("0 = snap to velocity each physics step; higher = smoother (less snappy).")]
     [SerializeField, Range(0f, 30f)] private float alignSmoothing = 12f;
+    [Tooltip("1 = Unity gravity (−9.81). 1.3–1.6 shortens the apex so room-scale shots feel less floaty "
+             + "without needing unrealistically slow launches.")]
+    [SerializeField, Min(0.1f)] private float gravityMultiplier = 1.35f;
+    [Tooltip("Light air drag (Rigidbody.drag). ~0.05–0.15 bleeds speed over distance.")]
+    [SerializeField, Min(0f)] private float airDrag = 0.08f;
 
     [Header("Impact")]
     [SerializeField] private bool stickOnHit = true;
@@ -167,6 +172,12 @@ public class ArrowProjectile : MonoBehaviour
         if (!flying || stuck || body == null || body.isKinematic)
         {
             return;
+        }
+
+        // Extra gravity beyond Physics.gravity (useGravity already applies 1×).
+        if (gravityMultiplier > 1.001f)
+        {
+            body.AddForce(Physics.gravity * (gravityMultiplier - 1f), ForceMode.Acceleration);
         }
 
         Vector3 velocity = body.velocity;
@@ -329,6 +340,8 @@ public class ArrowProjectile : MonoBehaviour
         body.constraints = RigidbodyConstraints.None;
         // Rotation is driven to follow velocity; freeze random physics spin.
         body.freezeRotation = alignToVelocity;
+        body.drag = airDrag;
+        body.angularDrag = 0.05f;
         body.interpolation = RigidbodyInterpolation.Interpolate;
         body.velocity = direction * speed;
         body.angularVelocity = Vector3.zero;
@@ -347,6 +360,7 @@ public class ArrowProjectile : MonoBehaviour
         body.detectCollisions = false;
         body.useGravity = false;
         body.freezeRotation = false;
+        body.drag = 0f;
         body.velocity = Vector3.zero;
         body.angularVelocity = Vector3.zero;
     }

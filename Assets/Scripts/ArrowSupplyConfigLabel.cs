@@ -2,22 +2,20 @@ using UnityEngine;
 using Votanic.vXR.vCast;
 
 /// <summary>
-/// World-space panel for target practice: start → live timer → score / retry.
-/// Click with mouse (desktop) or wand+trigger (CAVE), same pattern as the quiver.
+/// World-space config label: click / wand-trigger to toggle arrow supply mode
+/// (Always Ready on hand vs pick up from barrel).
+/// Setup: create empty GameObject → Add Component ArrowSupplyConfigLabel
+/// (or right-click BowController → Create Arrow Supply Config Label).
 /// </summary>
 [RequireComponent(typeof(Collider))]
-public class TargetPracticeUI : MonoBehaviour
+public class ArrowSupplyConfigLabel : MonoBehaviour
 {
-    public enum PanelState
-    {
-        Start,
-        Playing,
-        Results
-    }
+    [Header("References")]
+    [SerializeField] private BowController bow;
 
     [Header("Display")]
     [SerializeField] private TextMesh label;
-    [SerializeField] private float characterSize = 0.08f;
+    [SerializeField] private float characterSize = 0.06f;
     [SerializeField] private Color textColor = Color.white;
 
     [Header("Interact")]
@@ -27,37 +25,45 @@ public class TargetPracticeUI : MonoBehaviour
     [SerializeField] private int maxAxesToScan = 16;
     [SerializeField] private int maxButtonsToScan = 16;
 
-    private TargetPracticeGame game;
-    private PanelState state = PanelState.Start;
     private bool wasTriggerHeld;
-    private string cachedText = "Shoot the center\ntarget to start";
 
-    /// <summary>Assign a TextMesh from the editor setup helper.</summary>
-    public void SetLabel(TextMesh textMesh)
+    public void AssignBowAndLabel(BowController bowController, TextMesh textMesh)
     {
+        bow = bowController;
         label = textMesh;
-    }
-
-    public void Bind(TargetPracticeGame owner)
-    {
-        game = owner;
         EnsureLabel();
         EnsureInteractable();
-        ShowStart();
+        RefreshLabel();
+    }
+
+    private void Awake()
+    {
+        if (bow == null)
+        {
+            bow = FindObjectOfType<BowController>();
+        }
+
+        EnsureLabel();
+        EnsureInteractable();
+        RefreshLabel();
     }
 
     private void Update()
     {
-        if (game == null)
+        if (bow == null)
         {
-            return;
+            bow = FindObjectOfType<BowController>();
+            if (bow == null)
+            {
+                return;
+            }
         }
 
         if (PlayEnvironment.IsDesktopInput)
         {
             if (Input.GetMouseButtonDown(0) && IsCursorOverPanel())
             {
-                HandleClick();
+                Toggle();
             }
         }
         else
@@ -67,92 +73,84 @@ public class TargetPracticeUI : MonoBehaviour
             wasTriggerHeld = held;
             if (pressed && IsWandTargetingPanel())
             {
-                HandleClick();
+                Toggle();
             }
         }
     }
 
-    public void ShowStart()
+    private void Toggle()
     {
-        state = PanelState.Start;
-        SetText("Shoot the center\ntarget to start");
-    }
-
-    public void ShowTimer(float secondsRemaining, int score)
-    {
-        state = PanelState.Playing;
-        int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsRemaining));
-        SetText("Time " + whole + "\nScore " + score);
-    }
-
-    public void ShowResults(int score, bool showRetryPrompt = true)
-    {
-        state = PanelState.Results;
-        if (showRetryPrompt)
+        if (bow == null)
         {
-            SetText("Score " + score + "\nShoot center target\nto try again");
+            return;
+        }
+
+        bow.ToggleSupplyMode();
+        RefreshLabel();
+    }
+
+    private void RefreshLabel()
+    {
+        EnsureLabel();
+        if (label == null)
+        {
+            return;
+        }
+
+        if (bow == null)
+        {
+            label.text = "Arrow Mode\n(no bow)";
+            return;
+        }
+
+        if (bow.IsAlwaysReadyMode)
+        {
+            label.text = "Arrow Mode\nAlways Ready";
         }
         else
         {
-            SetText("Score " + score);
+            label.text = "Arrow Mode\nFrom Barrel";
         }
     }
 
-    private void HandleClick()
+    /// <summary>
+    /// Rebuilds label content if the panel was created empty.
+    /// </summary>
+    [ContextMenu("Refresh Label")]
+    public void CreateConfigPanelHere()
     {
-        // Start / retry is by shooting the center target — panel is display-only.
+        EnsureLabel();
+        RefreshLabel();
     }
 
     private void EnsureLabel()
     {
         if (label != null)
         {
-            ApplyLabelStyle();
+            label.color = textColor;
+            label.characterSize = characterSize;
+            label.anchor = TextAnchor.MiddleCenter;
+            label.alignment = TextAlignment.Center;
             return;
         }
 
         label = GetComponentInChildren<TextMesh>();
         if (label != null)
         {
-            ApplyLabelStyle();
+            label.color = textColor;
+            label.characterSize = characterSize;
             return;
         }
 
         GameObject textGo = new GameObject("Label");
         textGo.transform.SetParent(transform, false);
-        textGo.transform.localPosition = Vector3.zero;
-        textGo.transform.localRotation = Quaternion.identity;
-        textGo.transform.localScale = Vector3.one;
-
+        textGo.transform.localPosition = new Vector3(0f, 0f, -0.01f);
         label = textGo.AddComponent<TextMesh>();
         label.anchor = TextAnchor.MiddleCenter;
         label.alignment = TextAlignment.Center;
-        label.fontSize = 64;
-        ApplyLabelStyle();
-        SetText(cachedText);
-    }
-
-    private void ApplyLabelStyle()
-    {
-        if (label == null)
-        {
-            return;
-        }
-
-        label.color = textColor;
         label.characterSize = characterSize;
-        label.anchor = TextAnchor.MiddleCenter;
-        label.alignment = TextAlignment.Center;
-    }
-
-    private void SetText(string value)
-    {
-        cachedText = value;
-        EnsureLabel();
-        if (label != null)
-        {
-            label.text = value;
-        }
+        label.fontSize = 48;
+        label.color = textColor;
     }
 
     private void EnsureInteractable()
@@ -195,8 +193,7 @@ public class TargetPracticeUI : MonoBehaviour
         {
             if (vCast.controller != null)
             {
-                if (IsOurInteractable(vCast.controller.selectedObject)
-                    || IsOurInteractable(vCast.controller.triggeredObject))
+                if (IsOurs(vCast.controller.selectedObject) || IsOurs(vCast.controller.triggeredObject))
                 {
                     return true;
                 }
@@ -220,17 +217,17 @@ public class TargetPracticeUI : MonoBehaviour
         return false;
     }
 
-    private bool IsOurInteractable(object obj)
+    private bool IsOurs(object obj)
     {
         if (obj == null)
         {
             return false;
         }
 
-        Component component = obj as Component;
-        if (component != null)
+        Component c = obj as Component;
+        if (c != null)
         {
-            return component.transform == transform || component.transform.IsChildOf(transform);
+            return c.transform == transform || c.transform.IsChildOf(transform);
         }
 
         GameObject go = obj as GameObject;
