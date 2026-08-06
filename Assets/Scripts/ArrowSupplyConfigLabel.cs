@@ -3,7 +3,7 @@ using Votanic.vXR.vCast;
 
 /// <summary>
 /// World-space config label: click / wand-trigger to toggle arrow supply mode
-/// (Always Ready on hand vs pick up from barrel).
+/// (Infinite on hand vs reach behind the back for Back Quiver).
 /// Setup: create empty GameObject → Add Component ArrowSupplyConfigLabel
 /// (or right-click BowController → Create Arrow Supply Config Label).
 /// </summary>
@@ -103,13 +103,13 @@ public class ArrowSupplyConfigLabel : MonoBehaviour
             return;
         }
 
-        if (bow.IsAlwaysReadyMode)
+        if (bow.IsInfiniteMode)
         {
-            label.text = "Arrow Mode\nAlways Ready";
+            label.text = "Arrow Mode\nInfinite";
         }
         else
         {
-            label.text = "Arrow Mode\nFrom Barrel";
+            label.text = "Arrow Mode\nBack Quiver";
         }
     }
 

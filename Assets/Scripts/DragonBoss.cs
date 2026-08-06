@@ -61,9 +61,22 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private float damageFlashDuration = 0.28f;
 
     [Header("Death")]
-    [SerializeField] private float fallDuration = 1.4f;
-    [SerializeField] private float fallDropDistance = 3.5f;
-    [SerializeField] private float fallPitchDegrees = 75f;
+    [Tooltip("Gravity scale while diving after death (1 = Physics.gravity).")]
+    [SerializeField] private float deathGravityMultiplier = 1.5f;
+    [Tooltip("How quickly the nose aligns with dive velocity (higher = snappier).")]
+    [SerializeField] private float deathDiveAlignSpeed = 3.5f;
+    [SerializeField] private float deathMaxFallSeconds = 8f;
+    [SerializeField] private LayerMask deathGroundMask = ~0;
+    [SerializeField] private float deathGroundProbeHeight = 120f;
+    [Tooltip("Stop when the head is this far above the hit ground.")]
+    [SerializeField] private float deathImpactClearance = 0.2f;
+    [Tooltip("Fallback fall distance if no floor collider is found. Flight Bounds are NOT used — "
+             + "death can fall below the flight box to the real ground.")]
+    [SerializeField] private float fallDropDistance = 12f;
+    [Tooltip("Optional floor marker. If set, death crashes at this height instead of raycasting.")]
+    [SerializeField] private Transform deathGroundAnchor;
+    [SerializeField] private float deathImpactArmSeconds = 0.25f;
+    [SerializeField] private float deathMaxSpeed = 22f;
     [SerializeField] private float fadeOutDuration = 0.65f;
 
     [Header("Hit Collider")]
@@ -150,6 +163,9 @@ public class DragonBoss : MonoBehaviour
     private Vector3 flightCenter;
     private float flightPhase;
     private Vector3 lastFlightPosition;
+    private Vector3 lastRootPosition;
+    private Vector3 flightVelocity;
+    private bool hasRootFlightSample;
     private Vector3 flightLeadLocal;
     private Vector3 flightTailLocal;
     private float flightBodyLength;
@@ -174,6 +190,10 @@ public class DragonBoss : MonoBehaviour
     public bool IsShielded => phase == FightPhase.Playing && shieldUp && !dead && !isDying;
     public bool IsDead => dead;
     public bool IsFightActive => phase == FightPhase.Playing && !dead && !isDying;
+    public bool ShouldShowCrystalShieldVisual =>
+        (phase == FightPhase.Waiting || phase == FightPhase.Playing)
+        && !dead && !isDying
+        && liveCrystals.Count > 0;
     public int CurrentHp => currentHp;
     public int MaxHp => maxHp;
     public Color CrystalEnergyColor => shieldColor;
@@ -296,7 +316,7 @@ public class DragonBoss : MonoBehaviour
             }
         }
 
-        if (dead || !shieldUp || shieldMaterial == null || phase != FightPhase.Playing)
+        if (dead || !ShouldShowCrystalShieldVisual || shieldMaterial == null)
         {
             return;
         }
@@ -348,6 +368,9 @@ public class DragonBoss : MonoBehaviour
         transform.position = spawnPosition;
         transform.rotation = spawnRotation;
         RestoreBodyVisuals();
+        hasRootFlightSample = false;
+        flightVelocity = Vector3.zero;
+        lastRootPosition = spawnPosition;
 
         SetAnimatorRunning(false);
         SetDragonCollidersEnabled(true);
@@ -403,7 +426,6 @@ public class DragonBoss : MonoBehaviour
         currentHp = maxHp;
         SetAnimatorRunning(true, idleAnimSpeed);
         RefreshShieldState();
-        SetShieldVisible(false);
         RestoreBodyVisuals();
 
         if (fightUI != null)
@@ -654,11 +676,13 @@ public class DragonBoss : MonoBehaviour
     {
         liveCrystals.RemoveAll(c => c == null || !c.IsAlive);
 
-        bool shouldShield = phase == FightPhase.Playing && !dead && !isDying && liveCrystals.Count > 0;
-        if (shouldShield != shieldUp)
+        bool shouldShieldFunctional = phase == FightPhase.Playing && !dead && !isDying && liveCrystals.Count > 0;
+        bool shouldShieldVisual = ShouldShowCrystalShieldVisual;
+
+        if (shouldShieldFunctional != shieldUp)
         {
-            shieldUp = shouldShield;
-            if (logStateChanges)
+            shieldUp = shouldShieldFunctional;
+            if (logStateChanges && phase == FightPhase.Playing)
             {
                 Debug.Log(
                     shieldUp
@@ -668,7 +692,7 @@ public class DragonBoss : MonoBehaviour
             }
         }
 
-        SetShieldVisible(shieldUp);
+        SetShieldVisible(shouldShieldVisual);
     }
 
     private void OnCollisionEnter(Collision collision)
@@ -781,6 +805,7 @@ public class DragonBoss : MonoBehaviour
         ClearFireballs();
         FightAudio.SetDragonFlying(false);
         FightAudio.PlayDragonDeath(transform.position);
+        OpaqueBurstVfx.SpawnDragonDeath(transform, CrystalEnergyColor);
 
         if (deathRoutine != null)
         {
@@ -792,21 +817,71 @@ public class DragonBoss : MonoBehaviour
 
     private IEnumerator DeathFallAndFadeRoutine()
     {
-        Vector3 startPos = transform.position;
-        Quaternion startRot = transform.rotation;
-        Vector3 endPos = startPos + Vector3.down * fallDropDistance;
-        Quaternion tippedRot = startRot * Quaternion.Euler(fallPitchDegrees, 0f, 0f);
+        Vector3 velocity = flightVelocity;
+        if (velocity.sqrMagnitude < 0.25f)
+        {
+            velocity = GetBodyForwardWorld() * Mathf.Max(3f, EstimateFlightSpeed());
+        }
+
+        float maxSpeed = Mathf.Max(4f, deathMaxSpeed);
+        if (velocity.sqrMagnitude > maxSpeed * maxSpeed)
+        {
+            velocity = velocity.normalized * maxSpeed;
+        }
+
+        float startNoseY = ResolveFlightLeadWorldPosition().y;
+        float startY = Mathf.Min(startNoseY, transform.position.y);
+        float groundY = ResolveDeathGroundY(transform.position, startY);
 
         float fallElapsed = 0f;
-        while (fallElapsed < fallDuration)
+        bool crashed = false;
+
+        while (fallElapsed < deathMaxFallSeconds && !crashed)
         {
-            fallElapsed += Time.deltaTime;
-            float t = Mathf.Clamp01(fallElapsed / fallDuration);
-            float eased = t * t;
-            transform.position = Vector3.Lerp(startPos, endPos, eased);
-            transform.rotation = Quaternion.Slerp(startRot, tippedRot, eased);
+            float dt = Time.deltaTime;
+            fallElapsed += dt;
+
+            velocity += Physics.gravity * deathGravityMultiplier * dt;
+            if (velocity.sqrMagnitude > maxSpeed * maxSpeed)
+            {
+                velocity = velocity.normalized * maxSpeed;
+            }
+
+            transform.position += velocity * dt;
+
+            // Tip nose along velocity without quaternion flips that can bury the mesh.
+            Vector3 diveAxis = velocity.sqrMagnitude > 0.01f ? velocity.normalized : Vector3.down;
+            Vector3 currentAxis = GetBodyForwardWorld();
+            float align = 1f - Mathf.Exp(-deathDiveAlignSpeed * dt);
+            Vector3 tippedAxis = Vector3.Slerp(currentAxis, diveAxis, align).normalized;
+            if (tippedAxis.sqrMagnitude > 1e-6f)
+            {
+                transform.rotation = RotationFromBodyAxisForDive(tippedAxis);
+            }
+
+            float noseY = ResolveFlightLeadWorldPosition().y;
+            bool armed = fallElapsed >= deathImpactArmSeconds
+                         && velocity.y <= 0f
+                         && noseY < startY - 0.75f;
+            if (armed && noseY <= groundY + deathImpactClearance)
+            {
+                transform.position += Vector3.up * (groundY + deathImpactClearance - noseY);
+                crashed = true;
+            }
+
             yield return null;
         }
+
+        // Impact pop when the head hits the ground.
+        OpaqueBurstVfx.Settings impact = OpaqueBurstVfx.Settings.DragonDeathDefault;
+        impact.startSize = 0.6f;
+        impact.radius = 2.8f;
+        impact.duration = 0.7f;
+        impact.sparkCount = 32;
+        impact.shardCount = 12;
+        impact.coreColor = CrystalEnergyColor;
+        impact.sparkColor = Color.Lerp(CrystalEnergyColor, Color.white, 0.3f);
+        OpaqueBurstVfx.Spawn(ResolveFlightLeadWorldPosition(), impact);
 
         float fadeElapsed = 0f;
         while (fadeElapsed < fadeOutDuration)
@@ -932,6 +1007,129 @@ public class DragonBoss : MonoBehaviour
 
         transform.SetPositionAndRotation(targetRootPos, targetRot);
         lastFlightPosition = headPath;
+
+        if (hasRootFlightSample && Time.deltaTime > 1e-5f)
+        {
+            flightVelocity = (transform.position - lastRootPosition) / Time.deltaTime;
+        }
+
+        lastRootPosition = transform.position;
+        hasRootFlightSample = true;
+    }
+
+    private Vector3 ResolveFlightLeadWorldPosition()
+    {
+        if (flightLead != null)
+        {
+            return flightLead.position;
+        }
+
+        return transform.TransformPoint(flightLeadLocal);
+    }
+
+    private Vector3 GetBodyForwardWorld()
+    {
+        Vector3 localAxis = flightLeadLocal - flightTailLocal;
+        if (localAxis.sqrMagnitude < 1e-6f)
+        {
+            localAxis = Vector3.forward;
+        }
+
+        return transform.TransformDirection(localAxis.normalized);
+    }
+
+    private float EstimateFlightSpeed()
+    {
+        GetEffectivePathSize(out float width, out float depth, out _);
+        float pathScale = Mathf.Max(width, depth, 1f);
+        return pathSpeed * pathScale * 2.5f;
+    }
+
+    private float ResolveDeathGroundY(Vector3 fromPosition, float startY)
+    {
+        // Flight Bounds are only the flight envelope — death falls past them to the real floor.
+        if (deathGroundAnchor != null)
+        {
+            return deathGroundAnchor.position.y;
+        }
+
+        float fallback = startY - Mathf.Max(2f, fallDropDistance);
+        float probeDistance = Mathf.Max(fallDropDistance + 20f, deathGroundProbeHeight);
+        Vector3 origin = fromPosition + Vector3.up * 2f;
+
+        RaycastHit[] hits = Physics.RaycastAll(
+            origin,
+            Vector3.down,
+            probeDistance,
+            deathGroundMask,
+            QueryTriggerInteraction.Ignore);
+
+        float lowestY = float.PositiveInfinity;
+        bool found = false;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            float y = hits[i].point.y;
+            // Skip hits near/above the body (own leftover colliders, nearby props).
+            if (y >= startY - 0.5f)
+            {
+                continue;
+            }
+
+            if (y < lowestY)
+            {
+                lowestY = y;
+                found = true;
+            }
+        }
+
+        return found ? lowestY : fallback;
+    }
+
+    /// <summary>
+    /// Same as body-axis aim, but stable when diving nearly straight down.
+    /// </summary>
+    private Quaternion RotationFromBodyAxisForDive(Vector3 worldAxis)
+    {
+        worldAxis.Normalize();
+        Vector3 upHint = Vector3.up;
+        if (Mathf.Abs(Vector3.Dot(worldAxis, Vector3.up)) > 0.92f)
+        {
+            upHint = Vector3.ProjectOnPlane(transform.up, worldAxis);
+            if (upHint.sqrMagnitude < 1e-4f)
+            {
+                upHint = Vector3.ProjectOnPlane(transform.right, worldAxis);
+            }
+
+            if (upHint.sqrMagnitude < 1e-4f)
+            {
+                upHint = Vector3.forward;
+            }
+            else
+            {
+                upHint.Normalize();
+            }
+        }
+
+        Vector3 localAxis = flightLeadLocal - flightTailLocal;
+        if (localAxis.sqrMagnitude < 1e-6f)
+        {
+            localAxis = Vector3.forward;
+        }
+        else
+        {
+            localAxis.Normalize();
+        }
+
+        Quaternion worldFace = Quaternion.LookRotation(worldAxis, upHint);
+        Quaternion localFace = Quaternion.LookRotation(localAxis, Vector3.up);
+        Quaternion rot = worldFace * Quaternion.Inverse(localFace);
+
+        if (Mathf.Abs(modelTwistDegrees) > 0.01f)
+        {
+            rot = Quaternion.AngleAxis(modelTwistDegrees, worldAxis) * rot;
+        }
+
+        return rot;
     }
 
     private void CacheFlightMarkers()
@@ -1870,7 +2068,7 @@ public class DragonBoss : MonoBehaviour
             Debug.Log("DragonBoss: built crystal shield outline on " + created + " mesh(es).", this);
         }
 
-        SetShieldVisible(shieldUp && !dead);
+        SetShieldVisible(ShouldShowCrystalShieldVisual);
     }
 
     private void ClearShieldOutlines()

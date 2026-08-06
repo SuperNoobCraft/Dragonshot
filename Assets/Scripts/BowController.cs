@@ -3,8 +3,8 @@ using Votanic.vXR.vCast;
 
 public enum ArrowSupplyMode
 {
-    AlwaysReady,
-    FromBarrel
+    Infinite,
+    BackQuiver
 }
 
 /// <summary>
@@ -33,12 +33,10 @@ public class BowController : MonoBehaviour
     [SerializeField] private Transform arrowRest;
     [Tooltip("Bow model string control (moves the string curve). Follows right hand / arrow rear while drawing.")]
     [SerializeField] private Transform bowString;
-    [Tooltip("If set (or found in scene), used when supply mode is From Barrel.")]
-    [SerializeField] private ArrowQuiver quiver;
-    [Tooltip("When Always Ready, keep a held arrow available automatically after each shot.")]
+    [Tooltip("Infinite = arrow auto-spawns on hand after each shot. Back Quiver = reach behind your back for each arrow.")]
+    [SerializeField] private ArrowSupplyMode supplyMode = ArrowSupplyMode.BackQuiver;
+    [Tooltip("Infinite mode only: keep a held arrow available automatically after each shot.")]
     [SerializeField] private bool autoSpawnHeldArrow = true;
-    [Tooltip("Always Ready = arrow on hand without barrel. From Barrel = pick up from quiver.")]
-    [SerializeField] private ArrowSupplyMode supplyMode = ArrowSupplyMode.FromBarrel;
 
     [Header("Shot")]
     [Tooltip("HP removed from the dragon per arrow hit.")]
@@ -94,6 +92,27 @@ public class BowController : MonoBehaviour
     [Tooltip("Hide Votanic wand laser while an arrow is in hand (uses DisplayWandRay / EnableWandRay).")]
     [SerializeField] private bool hideWandRayWhileHoldingArrow = true;
 
+    [Header("Back Quiver")]
+    [Tooltip("Used when Arrow Supply Mode is Back Quiver.")]
+    [SerializeField] private float backQuiverReachDistance = 0.68f;
+    [Tooltip("Hand must be at least this far behind the head (head-local −Z, meters).")]
+    [SerializeField] private float backQuiverMinBehind = 0.14f;
+    [Tooltip("Head-local Y upper limit: hand must be at or below −this value. Negative allows slightly above the head "
+             + "(arrows sticking out of a back quiver).")]
+    [SerializeField] private float backQuiverMinBelow = -0.25f;
+    [Tooltip("Head-local Y lower limit: hand must stay above −this value (waist floor — blocks behind-the-butt reaches).")]
+    [SerializeField] private float backQuiverMaxBelow = 0.5f;
+    [Tooltip("Head→hand must point clearly behind the look direction (0–1). Higher = harder to trigger by accident.")]
+    [SerializeField, Range(0.2f, 0.85f)] private float backQuiverBehindDot = 0.42f;
+    [Tooltip("Max sideways offset from head center (head-local |X|, meters).")]
+    [SerializeField] private float backQuiverMaxLateral = 0.42f;
+    [Tooltip("Right hand must be at least this far from the bow while reaching (avoids nock-zone false grabs).")]
+    [SerializeField] private float backQuiverMinBowClearance = 0.38f;
+    [Tooltip("Hold the reach pose briefly before an arrow appears.")]
+    [SerializeField] private float backQuiverDwellSeconds = 0.14f;
+    [Tooltip("Desktop fallback while testing back quiver (simulates a reach pickup).")]
+    [SerializeField] private KeyCode desktopBackQuiverKey = KeyCode.B;
+
     private enum State { Idle, Drawing }
 
     private State state;
@@ -110,6 +129,7 @@ public class BowController : MonoBehaviour
     private bool wandRayForcedHidden;
     private bool loggedDesktopHead;
     private bool rmbWasHeld;
+    private float backQuiverDwell;
 
     /// <summary>
     /// Places an editable world-space toggle panel near the bow.
@@ -237,10 +257,14 @@ public class BowController : MonoBehaviour
 
     public ArrowSupplyMode SupplyMode => supplyMode;
 
-    public bool IsAlwaysReadyMode => supplyMode == ArrowSupplyMode.AlwaysReady;
+    public bool IsInfiniteMode => supplyMode == ArrowSupplyMode.Infinite;
+
+    public bool IsAlwaysReadyMode => IsInfiniteMode;
+
+    public bool IsBackQuiverMode => supplyMode == ArrowSupplyMode.BackQuiver;
 
     /// <summary>
-    /// Toggle or set whether arrows auto-appear on the hand, or must be taken from the barrel.
+    /// Toggle or set infinite auto-arrows vs back-quiver reach pickup.
     /// </summary>
     public void SetSupplyMode(ArrowSupplyMode mode)
     {
@@ -250,16 +274,34 @@ public class BowController : MonoBehaviour
         }
 
         supplyMode = mode;
+        if (IsBackQuiverMode)
+        {
+            ClearHeldArrow();
+        }
+
         ApplySupplyMode();
     }
 
     public ArrowSupplyMode ToggleSupplyMode()
     {
         SetSupplyMode(
-            supplyMode == ArrowSupplyMode.AlwaysReady
-                ? ArrowSupplyMode.FromBarrel
-                : ArrowSupplyMode.AlwaysReady);
+            supplyMode == ArrowSupplyMode.Infinite
+                ? ArrowSupplyMode.BackQuiver
+                : ArrowSupplyMode.Infinite);
         return supplyMode;
+    }
+
+    public static string SupplyModeLabel(ArrowSupplyMode mode)
+    {
+        switch (mode)
+        {
+            case ArrowSupplyMode.Infinite:
+                return "Infinite";
+            case ArrowSupplyMode.BackQuiver:
+                return "Back Quiver";
+            default:
+                return mode.ToString();
+        }
     }
 
     public BowAimMode AimMode => aimMode;
@@ -316,9 +358,7 @@ public class BowController : MonoBehaviour
         if (logInputDetection)
         {
             Debug.Log(
-                supplyMode == ArrowSupplyMode.AlwaysReady
-                    ? "BowController: arrow supply = Always Ready (auto on hand)."
-                    : "BowController: arrow supply = From Barrel (pick up from quiver).",
+                "BowController: arrow supply = " + SupplyModeLabel(supplyMode) + ".",
                 this);
         }
     }
@@ -346,10 +386,8 @@ public class BowController : MonoBehaviour
         }
     }
 
-    private bool UsesQuiver => supplyMode == ArrowSupplyMode.FromBarrel && quiver != null;
-
     private bool ShouldAutoSpawnHeldArrow =>
-        supplyMode == ArrowSupplyMode.AlwaysReady && autoSpawnHeldArrow;
+        supplyMode == ArrowSupplyMode.Infinite && autoSpawnHeldArrow;
 
     private void Awake()
     {
@@ -361,15 +399,6 @@ public class BowController : MonoBehaviour
         if (leftHandChild == null)
         {
             leftHandChild = GetComponent<LeftHandChild>();
-        }
-
-        if (quiver == null)
-        {
-#if UNITY_2023_1_OR_NEWER
-            quiver = FindFirstObjectByType<ArrowQuiver>();
-#else
-            quiver = FindObjectOfType<ArrowQuiver>();
-#endif
         }
 
         bowColliders = GetComponentsInChildren<Collider>(true);
@@ -424,6 +453,8 @@ public class BowController : MonoBehaviour
         {
             TrackedInput();
         }
+
+        UpdateBackQuiverPickup();
     }
 
     private void LateUpdate()
@@ -491,9 +522,9 @@ public class BowController : MonoBehaviour
         if (!desktop && logInputDetection)
         {
             Debug.Log(
-                UsesQuiver
-                    ? "BowController: CAVE mode — pick arrows from the quiver, then nock/pull/release."
-                    : "BowController: CAVE mode — always-ready arrow on hand; nock/pull/release.",
+                IsBackQuiverMode
+                    ? "BowController: CAVE mode — reach behind your back for arrows, then nock/pull/release."
+                    : "BowController: CAVE mode — infinite arrows on hand; nock/pull/release.",
                 this);
         }
     }
@@ -775,7 +806,7 @@ public class BowController : MonoBehaviour
         {
             if (logInputDetection)
             {
-                Debug.Log("Bow: RMB draw ignored — no arrow in hand (pick from quiver).", this);
+                Debug.Log("Bow: RMB draw ignored — no arrow in hand (reach behind your back).", this);
             }
 
             return;
@@ -1213,7 +1244,7 @@ public class BowController : MonoBehaviour
 
     private void SpawnArrow()
     {
-        if (UsesQuiver || arrow != null || arrowPrefab == null)
+        if (IsBackQuiverMode || arrow != null || arrowPrefab == null)
         {
             return;
         }
@@ -1227,6 +1258,155 @@ public class BowController : MonoBehaviour
         {
             Transform parent = arrowRest != null ? arrowRest : transform;
             arrow.Nock(parent);
+        }
+    }
+
+    private void ClearHeldArrow()
+    {
+        if (arrow == null)
+        {
+            return;
+        }
+
+        CancelDraw();
+        Destroy(arrow.gameObject);
+        arrow = null;
+        UpdateWandRayVisibility();
+    }
+
+    private void UpdateBackQuiverPickup()
+    {
+        if (!IsBackQuiverMode || arrow != null || arrowPrefab == null || state != State.Idle)
+        {
+            backQuiverDwell = 0f;
+            return;
+        }
+
+        desktop = PlayEnvironment.IsDesktopInput;
+
+        if (desktop)
+        {
+            if (Input.GetKeyDown(desktopBackQuiverKey))
+            {
+                TryPickupFromBackQuiver();
+            }
+
+            return;
+        }
+
+        FindRightHand();
+        if (IsRightHandAtBackQuiver())
+        {
+            backQuiverDwell += Time.deltaTime;
+            if (backQuiverDwell >= backQuiverDwellSeconds)
+            {
+                TryPickupFromBackQuiver();
+                backQuiverDwell = 0f;
+            }
+        }
+        else
+        {
+            backQuiverDwell = 0f;
+        }
+    }
+
+    private bool IsRightHandAtBackQuiver()
+    {
+        if (rightHand == null)
+        {
+            return false;
+        }
+
+        Transform head = PlayEnvironment.ResolveHeadTransform();
+        if (head == null)
+        {
+            return false;
+        }
+
+        Vector3 handPos = rightHand.position;
+        Vector3 toHand = handPos - head.position;
+        float dist = toHand.magnitude;
+        if (dist < 0.05f || dist > backQuiverReachDistance)
+        {
+            return false;
+        }
+
+        Vector3 local = head.InverseTransformPoint(handPos);
+        if (local.z > -backQuiverMinBehind)
+        {
+            return false;
+        }
+
+        if (local.y > -backQuiverMinBelow)
+        {
+            return false;
+        }
+
+        if (local.y < -backQuiverMaxBelow)
+        {
+            return false;
+        }
+
+        if (Mathf.Abs(local.x) > backQuiverMaxLateral)
+        {
+            return false;
+        }
+
+        Vector3 flatForward = Vector3.ProjectOnPlane(head.forward, Vector3.up);
+        if (flatForward.sqrMagnitude < 1e-6f)
+        {
+            flatForward = head.forward;
+        }
+        else
+        {
+            flatForward.Normalize();
+        }
+
+        Vector3 flatToHand = Vector3.ProjectOnPlane(toHand, Vector3.up);
+        if (flatToHand.sqrMagnitude < 1e-6f)
+        {
+            return false;
+        }
+
+        flatToHand.Normalize();
+        if (Vector3.Dot(flatForward, flatToHand) > -backQuiverBehindDot)
+        {
+            return false;
+        }
+
+        float bowClear = Vector3.Distance(handPos, GetArrowRestPosition());
+        if (bowClear < backQuiverMinBowClearance)
+        {
+            return false;
+        }
+
+        if (leftHandChild != null && leftHandChild.BoundHand != null)
+        {
+            float leftClear = Vector3.Distance(handPos, leftHandChild.BoundHand.position);
+            if (leftClear < backQuiverMinBowClearance)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void TryPickupFromBackQuiver()
+    {
+        if (!IsBackQuiverMode || arrow != null || arrowPrefab == null)
+        {
+            return;
+        }
+
+        ArrowProjectile instance = Instantiate(arrowPrefab);
+        if (!EquipArrow(instance))
+        {
+            Destroy(instance.gameObject);
+        }
+        else if (logInputDetection)
+        {
+            Debug.Log("BowController: picked up arrow from back quiver.", this);
         }
     }
 

@@ -67,6 +67,12 @@ public class ArrowQuiver : MonoBehaviour
             return;
         }
 
+        if (bow != null && bow.IsBackQuiverMode)
+        {
+            wasTriggerHeld = IsTriggerHeld();
+            return;
+        }
+
         if (PlayEnvironment.IsDesktopInput)
         {
             TryDesktopInteract();
