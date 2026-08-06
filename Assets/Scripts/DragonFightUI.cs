@@ -14,7 +14,8 @@ public class DragonFightUI : MonoBehaviour
         Start,
         Playing,
         Victory,
-        Timeout
+        Timeout,
+        Defeat
     }
 
     [Header("References")]
@@ -124,6 +125,12 @@ public class DragonFightUI : MonoBehaviour
         SetText("TIME UP\nRESET");
     }
 
+    public void ShowDefeat()
+    {
+        state = PanelState.Defeat;
+        SetText("DEFEAT\nHit by fireball\nRESET");
+    }
+
     private void HandleClick()
     {
         if (dragon == null)
@@ -137,7 +144,7 @@ public class DragonFightUI : MonoBehaviour
             return;
         }
 
-        // Playing / victory / timeout → reset back to start.
+        // Playing / victory / timeout / defeat → reset back to start.
         dragon.ResetFight();
     }
 

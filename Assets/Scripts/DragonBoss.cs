@@ -75,23 +75,59 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private BoxCollider hitCollider;
 
     [Header("Flight Path")]
-    [Tooltip("World center of the figure-8. If empty, uses this object's position at Awake.")]
+    [Tooltip("World center of the figure-8. If empty, uses Flight Bounds center or this object.")]
     [SerializeField] private Transform flightCenterAnchor;
-    [SerializeField] private float pathWidth = 5f;
-    [SerializeField] private float pathDepth = 3.5f;
-    [SerializeField] private float pathSpeed = 0.35f;
-    [Tooltip("Rotate the figure-8 horizontally (degrees).")]
+    [Tooltip("Optional box the dragon flies inside. Create via context menu, then scale it — "
+             + "the figure-8 fills this box when Constrain is on.")]
+    [SerializeField] private Transform flightBounds;
+    [Tooltip("When on, path size comes from Flight Bounds (fills the box). Path Width/Depth are ignored.")]
+    [SerializeField] private bool constrainToFlightBounds = true;
+    [Tooltip("Use this fraction of the bounds (1 = edge-to-edge).")]
+    [SerializeField, Range(0.5f, 1f)] private float flightBoundsPadding = 0.92f;
+    [Tooltip("Figure-8 half-width (X). Only used when Flight Bounds is empty / constrain is off.")]
+    [SerializeField] private float pathWidth = 4f;
+    [Tooltip("Figure-8 half-depth (Z). Only used when Flight Bounds is empty / constrain is off.")]
+    [SerializeField] private float pathDepth = 3f;
+    [SerializeField] private float pathSpeed = 0.28f;
+    [Tooltip("Rotate the figure-8 horizontally (degrees). Ignored when Flight Bounds is used (follows box yaw).")]
     [SerializeField] private float pathYawDegrees = 0f;
-    [Tooltip("Extra yaw so flight direction matches model forward. 180 for models facing -Z.")]
-    [SerializeField] private float modelYawOffsetDegrees = 180f;
+    [Tooltip("Empty at the snout/head. Path tracks this point. Create via context menu.")]
+    [SerializeField] private Transform flightLead;
+    [Tooltip("Empty at the tail tip. Used with Flight Lead to size the body and aim rotation.")]
+    [SerializeField] private Transform flightTail;
+    [Tooltip("Fallback nose offset if Flight Lead is empty (local-forward meters).")]
+    [SerializeField, Min(0.1f)] private float flightLeadDistance = 2f;
+    [Tooltip("Fallback tail offset if Flight Tail is empty (local-back meters).")]
+    [SerializeField, Min(0.1f)] private float flightTailDistance = 2f;
+    [Tooltip("If on, path lobes grow with body length (still capped by Flight Bounds if set).")]
+    [SerializeField] private bool autoFitPathToBody = false;
+    [SerializeField, Min(1.2f)] private float pathBodyClearance = 2.2f;
+    [Tooltip("Extra twist around the body axis after lead→tail aiming (degrees).")]
+    [SerializeField] private float modelTwistDegrees = 0f;
     [SerializeField] private float heightAmplitude = 1.2f;
     [SerializeField] private float heightFrequency = 0.55f;
-    [SerializeField] private float pitchAmplitude = 12f;
+    [SerializeField] private float pitchAmplitude = 8f;
     [SerializeField] private float pitchFrequency = 0.22f;
     [SerializeField] private float pitchWobbleFrequency = 0.17f;
     [Tooltip("Figure-8 while waiting on Start (slower).")]
     [SerializeField] private bool idleFlightWhileWaiting = true;
     [SerializeField] private float idlePathSpeedMultiplier = 0.45f;
+
+    [Header("Fireballs")]
+    [SerializeField] private bool enableFireballs = true;
+    [Tooltip("Mouth / spawn point. Defaults to Flight Lead, then this transform.")]
+    [SerializeField] private Transform fireballSpawn;
+    [Tooltip("Seconds between shots while the fight is active.")]
+    [SerializeField, Min(1f)] private float fireballInterval = 5.5f;
+    [Tooltip("Delay after Start before the first fireball.")]
+    [SerializeField, Min(0f)] private float fireballFirstDelay = 2.5f;
+    [Tooltip("Chance to fire when a shot is due (0–1).")]
+    [SerializeField, Range(0f, 1f)] private float fireballChance = 0.75f;
+    [Tooltip("Only spawn when the mouth is in the center this fraction of Flight Bounds X "
+             + "(0.6 = middle 60%). Yellow gizmo when selected.")]
+    [SerializeField, Range(0.1f, 1f)] private float fireballSpawnCenterXFraction = 0.6f;
+    [Tooltip("Size, colors, outline, explosion — all editable here.")]
+    [SerializeField] private DragonFireballSettings fireballSettings = DragonFireballSettings.Default;
 
     private enum FightPhase
     {
@@ -102,6 +138,7 @@ public class DragonBoss : MonoBehaviour
 
     private readonly List<EnderCrystal> liveCrystals = new List<EnderCrystal>(8);
     private readonly List<GameObject> shieldOutlineObjects = new List<GameObject>(8);
+    private readonly List<DragonFireball> liveFireballs = new List<DragonFireball>(8);
     private bool shieldUp;
     private bool dead;
     private Material shieldMaterial;
@@ -113,12 +150,16 @@ public class DragonBoss : MonoBehaviour
     private Vector3 flightCenter;
     private float flightPhase;
     private Vector3 lastFlightPosition;
+    private Vector3 flightLeadLocal;
+    private Vector3 flightTailLocal;
+    private float flightBodyLength;
     private Vector3 spawnPosition;
     private Quaternion spawnRotation;
     private bool isDying;
     private float damageFlashEndTime;
     private Coroutine deathRoutine;
     private Vector3 visualScaleRootBaseScale;
+    private float nextFireballTime;
 
     private readonly List<BodyMaterialSlot> bodyMaterialSlots = new List<BodyMaterialSlot>(16);
 
@@ -188,6 +229,8 @@ public class DragonBoss : MonoBehaviour
         }
 
         ResolveVisualScaleRoot();
+        CacheFlightMarkers();
+        EnsureFireballSettings();
         spawnPosition = transform.position;
         spawnRotation = transform.rotation;
         currentHp = maxHp;
@@ -237,6 +280,7 @@ public class DragonBoss : MonoBehaviour
     {
         UpdateDamageFlash();
         UpdateFlightMotion();
+        UpdateFireballs();
 
         if (phase == FightPhase.Playing && !dead && !isDying)
         {
@@ -297,6 +341,9 @@ public class DragonBoss : MonoBehaviour
         timeRemaining = roundSeconds;
         currentHp = maxHp;
         damageFlashEndTime = 0f;
+        CacheFlightMarkers();
+        ClearFireballs();
+        nextFireballTime = Time.time + fireballFirstDelay;
 
         transform.position = spawnPosition;
         transform.rotation = spawnRotation;
@@ -377,6 +424,8 @@ public class DragonBoss : MonoBehaviour
         SetAnimatorRunning(false);
         SetShieldVisible(false);
         shieldUp = false;
+        ClearFireballs();
+        FightAudio.SetDragonFlying(false);
 
         if (fightUI != null)
         {
@@ -386,6 +435,169 @@ public class DragonBoss : MonoBehaviour
         if (logStateChanges)
         {
             Debug.Log("DragonBoss: time up.", this);
+        }
+    }
+
+    /// <summary>Player was hit by a fireball — fight lost.</summary>
+    public void NotifyPlayerHitByFireball(DragonFireball fireball)
+    {
+        EndFightDefeat();
+    }
+
+    public void UnregisterFireball(DragonFireball fireball)
+    {
+        if (fireball != null)
+        {
+            liveFireballs.Remove(fireball);
+        }
+    }
+
+    private void EndFightDefeat()
+    {
+        if (phase != FightPhase.Playing)
+        {
+            return;
+        }
+
+        phase = FightPhase.Ended;
+        SetAnimatorRunning(false);
+        SetShieldVisible(false);
+        shieldUp = false;
+        ClearFireballs();
+        FightAudio.SetDragonFlying(false);
+
+        if (fightUI != null)
+        {
+            fightUI.ShowDefeat();
+        }
+
+        if (logStateChanges)
+        {
+            Debug.Log("DragonBoss: defeat — player hit by fireball.", this);
+        }
+    }
+
+    private void UpdateFireballs()
+    {
+        if (!enableFireballs || !IsFightActive)
+        {
+            return;
+        }
+
+        if (Time.time < nextFireballTime)
+        {
+            return;
+        }
+
+        // Wait in the spawn band (center X of bounds) instead of wasting a long cooldown.
+        if (!IsFireballSpawnPositionAllowed(ResolveFireballSpawnPosition()))
+        {
+            return;
+        }
+
+        nextFireballTime = Time.time + fireballInterval;
+
+        if (Random.value > fireballChance)
+        {
+            return;
+        }
+
+        TrySpawnFireball();
+    }
+
+    private bool IsFireballSpawnPositionAllowed(Vector3 worldPosition)
+    {
+        if (!constrainToFlightBounds
+            || !TryGetFlightBounds(out Vector3 center, out Quaternion rotation, out Vector3 halfExtents))
+        {
+            return true;
+        }
+
+        Vector3 local = Quaternion.Inverse(rotation) * (worldPosition - center);
+        float allowedHalfX = halfExtents.x * Mathf.Clamp(fireballSpawnCenterXFraction, 0.1f, 1f);
+        return Mathf.Abs(local.x) <= allowedHalfX + 0.001f;
+    }
+
+    private void EnsureFireballSettings()
+    {
+        if (fireballSettings.size >= 0.15f && fireballSettings.speed >= 0.5f)
+        {
+            return;
+        }
+
+        fireballSettings = DragonFireballSettings.Default;
+    }
+
+    private void TrySpawnFireball()
+    {
+        EnsureFireballSettings();
+        Vector3 spawnPos = ResolveFireballSpawnPosition();
+        Vector3 target = PlayEnvironment.ResolvePlayerAimPosition();
+        Vector3 dir = target - spawnPos;
+        if (dir.sqrMagnitude < 1e-4f)
+        {
+            dir = -transform.forward;
+        }
+
+        dir.Normalize();
+
+        DragonFireball fireball = DragonFireball.Spawn(
+            spawnPos,
+            dir,
+            this,
+            fireballSettings);
+
+        FightAudio.PlayFireballShoot(spawnPos);
+
+        if (fireball != null)
+        {
+            liveFireballs.Add(fireball);
+        }
+
+        if (logStateChanges)
+        {
+            Debug.Log("DragonBoss: fireball launched toward player.", this);
+        }
+    }
+
+    private Vector3 ResolveFireballSpawnPosition()
+    {
+        if (fireballSpawn != null)
+        {
+            return fireballSpawn.position;
+        }
+
+        if (flightLead != null)
+        {
+            return flightLead.position;
+        }
+
+        return transform.TransformPoint(flightLeadLocal);
+    }
+
+    private void ClearFireballs()
+    {
+        for (int i = liveFireballs.Count - 1; i >= 0; i--)
+        {
+            if (liveFireballs[i] != null)
+            {
+                Destroy(liveFireballs[i].gameObject);
+            }
+        }
+
+        liveFireballs.Clear();
+
+#if UNITY_2023_1_OR_NEWER
+        DragonFireball[] leftover = FindObjectsByType<DragonFireball>(FindObjectsSortMode.None);
+#else
+        DragonFireball[] leftover = FindObjectsOfType<DragonFireball>();
+#endif
+        for (int i = 0; i < leftover.Length; i++)
+        {
+            if (leftover[i] != null)
+            {
+                Destroy(leftover[i].gameObject);
+            }
         }
     }
 
@@ -497,6 +709,7 @@ public class DragonBoss : MonoBehaviour
 
         if (IsShielded)
         {
+            FightAudio.PlayShieldBounce(arrow.transform.position);
             if (consumeArrowOnShieldHit)
             {
                 Destroy(arrow.gameObject);
@@ -533,6 +746,7 @@ public class DragonBoss : MonoBehaviour
 
         currentHp = Mathf.Max(0, currentHp - amount);
         damageFlashEndTime = Time.time + damageFlashDuration;
+        FightAudio.PlayDragonHurt(transform.position);
 
         if (fightUI != null)
         {
@@ -564,6 +778,9 @@ public class DragonBoss : MonoBehaviour
         SetShieldVisible(false);
         SetAnimatorRunning(false);
         SetDragonCollidersEnabled(false);
+        ClearFireballs();
+        FightAudio.SetDragonFlying(false);
+        FightAudio.PlayDragonDeath(transform.position);
 
         if (deathRoutine != null)
         {
@@ -633,6 +850,13 @@ public class DragonBoss : MonoBehaviour
 
     private void ResolveFlightCenter()
     {
+        if (constrainToFlightBounds
+            && TryGetFlightBounds(out Vector3 boundsCenter, out _, out _))
+        {
+            flightCenter = boundsCenter;
+            return;
+        }
+
         if (flightCenterAnchor != null)
         {
             flightCenter = flightCenterAnchor.position;
@@ -647,11 +871,14 @@ public class DragonBoss : MonoBehaviour
     {
         if (isDying)
         {
+            FightAudio.SetDragonFlying(false);
             return;
         }
 
         bool flying = phase == FightPhase.Playing && !dead
                         || (phase == FightPhase.Waiting && idleFlightWhileWaiting);
+
+        FightAudio.SetDragonFlying(flying);
 
         if (!flying)
         {
@@ -661,60 +888,262 @@ public class DragonBoss : MonoBehaviour
         float speedMul = phase == FightPhase.Playing ? 1f : idlePathSpeedMultiplier;
         flightPhase += pathSpeed * speedMul * Time.deltaTime;
 
-        float t = flightPhase;
-        float omegaT = t;
+        ResolveFlightCenter();
 
-        // Horizontal figure-8 in local XZ, then rotate to arena orientation.
+        float width;
+        float depth;
+        float heightAmp;
+        GetEffectivePathSize(out width, out depth, out heightAmp);
+
+        // Head on path now; tail on path one body-length behind (arc length).
+        Vector3 headPath = EvaluatePathPoint(flightPhase, width, depth, heightAmp);
+        Vector3 tailPath = FindPathPointBehind(flightPhase, flightBodyLength, width, depth, heightAmp);
+
+        Vector3 pathAxis = headPath - tailPath;
+        if (pathAxis.sqrMagnitude < 1e-6f)
+        {
+            pathAxis = EvaluatePathTangent(flightPhase, width, depth, heightAmp);
+        }
+
+        if (pathAxis.sqrMagnitude < 1e-6f)
+        {
+            pathAxis = headPath - lastFlightPosition;
+        }
+
+        if (pathAxis.sqrMagnitude < 1e-6f)
+        {
+            pathAxis = Vector3.forward;
+        }
+
+        pathAxis.Normalize();
+
+        Quaternion targetRot = RotationFromBodyAxis(pathAxis);
+
+        // Light path pitch wobble around the body right axis (does not replace body aiming).
+        if (Mathf.Abs(pitchAmplitude) > 0.01f)
+        {
+            float pitch = pitchAmplitude * Mathf.Sin(flightPhase * pitchFrequency)
+                          * Mathf.Sin(flightPhase * pitchWobbleFrequency + 0.6f);
+            targetRot = Quaternion.AngleAxis(pitch, targetRot * Vector3.right) * targetRot;
+        }
+
+        // Root so the lead marker sits on headPath (tail then lands near tailPath).
+        Vector3 targetRootPos = headPath - targetRot * flightLeadLocal;
+
+        transform.SetPositionAndRotation(targetRootPos, targetRot);
+        lastFlightPosition = headPath;
+    }
+
+    private void CacheFlightMarkers()
+    {
+        // Prefer scene markers; fall back to distances along a default nose axis.
+        Vector3 defaultForward = Vector3.forward;
+
+        if (flightLead != null)
+        {
+            flightLeadLocal = transform.InverseTransformPoint(flightLead.position);
+        }
+        else
+        {
+            flightLeadLocal = defaultForward * flightLeadDistance;
+        }
+
+        if (flightTail != null)
+        {
+            flightTailLocal = transform.InverseTransformPoint(flightTail.position);
+        }
+        else
+        {
+            flightTailLocal = -defaultForward * flightTailDistance;
+        }
+
+        flightBodyLength = Vector3.Distance(flightLeadLocal, flightTailLocal);
+        if (flightBodyLength < 0.2f)
+        {
+            flightBodyLength = Mathf.Max(0.2f, flightLeadDistance + flightTailDistance);
+            flightLeadLocal = defaultForward * (flightBodyLength * 0.5f);
+            flightTailLocal = -defaultForward * (flightBodyLength * 0.5f);
+        }
+
+        if (logStateChanges)
+        {
+            Debug.Log(
+                "DragonBoss: flight markers — body length " + flightBodyLength.ToString("0.00")
+                + "m (lead " + flightLeadLocal + ", tail " + flightTailLocal + ").",
+                this);
+        }
+    }
+
+    private void GetEffectivePathSize(out float width, out float depth, out float heightAmp)
+    {
+        // Bounds mode: fill the box (this was staying centered because Path Width/Depth
+        // were treated as a max and never grew up to the box size).
+        if (constrainToFlightBounds
+            && TryGetFlightBounds(out _, out _, out Vector3 halfExtents))
+        {
+            float pad = Mathf.Clamp(flightBoundsPadding, 0.5f, 1f);
+            width = Mathf.Max(0.1f, halfExtents.x * pad);
+            depth = Mathf.Max(0.1f, halfExtents.z * pad);
+            // Path Y peaks at ~1.35× heightAmp — scale so peaks reach the box top/bottom.
+            heightAmp = Mathf.Max(0f, halfExtents.y * pad / 1.35f);
+            return;
+        }
+
+        width = Mathf.Max(0.1f, pathWidth);
+        depth = Mathf.Max(0.1f, pathDepth);
+        heightAmp = Mathf.Max(0f, heightAmplitude);
+
+        if (autoFitPathToBody)
+        {
+            float minLobe = flightBodyLength * pathBodyClearance;
+            width = Mathf.Max(width, minLobe);
+            depth = Mathf.Max(depth, minLobe * 0.75f);
+        }
+    }
+
+    private bool TryGetFlightBounds(out Vector3 center, out Quaternion rotation, out Vector3 halfExtents)
+    {
+        center = flightCenter;
+        rotation = Quaternion.Euler(0f, pathYawDegrees, 0f);
+        halfExtents = Vector3.zero;
+
+        if (flightBounds == null)
+        {
+            return false;
+        }
+
+        BoxCollider box = flightBounds.GetComponent<BoxCollider>();
+        if (box != null)
+        {
+            center = flightBounds.TransformPoint(box.center);
+            rotation = flightBounds.rotation;
+            Vector3 lossy = flightBounds.lossyScale;
+            halfExtents = new Vector3(
+                Mathf.Abs(box.size.x * lossy.x) * 0.5f,
+                Mathf.Abs(box.size.y * lossy.y) * 0.5f,
+                Mathf.Abs(box.size.z * lossy.z) * 0.5f);
+            return halfExtents.x > 0.01f && halfExtents.z > 0.01f;
+        }
+
+        center = flightBounds.position;
+        rotation = flightBounds.rotation;
+        Vector3 scale = flightBounds.lossyScale;
+        halfExtents = new Vector3(
+            Mathf.Abs(scale.x) * 0.5f,
+            Mathf.Abs(scale.y) * 0.5f,
+            Mathf.Abs(scale.z) * 0.5f);
+        return halfExtents.x > 0.01f && halfExtents.z > 0.01f;
+    }
+
+    /// <summary>
+    /// Rotation that aligns the model lead←tail axis with <paramref name="worldAxis"/> (tail→head).
+    /// </summary>
+    private Quaternion RotationFromBodyAxis(Vector3 worldAxis)
+    {
+        Vector3 localAxis = flightLeadLocal - flightTailLocal;
+        if (localAxis.sqrMagnitude < 1e-6f)
+        {
+            localAxis = Vector3.forward;
+        }
+        else
+        {
+            localAxis.Normalize();
+        }
+
+        worldAxis.Normalize();
+
+        // Map local body axis → world path axis, keeping belly roughly toward -up via LookRotation.
+        Quaternion worldFace = Quaternion.LookRotation(worldAxis, Vector3.up);
+        Quaternion localFace = Quaternion.LookRotation(localAxis, Vector3.up);
+        Quaternion rot = worldFace * Quaternion.Inverse(localFace);
+
+        if (Mathf.Abs(modelTwistDegrees) > 0.01f)
+        {
+            rot = Quaternion.AngleAxis(modelTwistDegrees, worldAxis) * rot;
+        }
+
+        return rot;
+    }
+
+    private Vector3 EvaluatePathPoint(float phase)
+    {
+        GetEffectivePathSize(out float width, out float depth, out float heightAmp);
+        return EvaluatePathPoint(phase, width, depth, heightAmp);
+    }
+
+    private Vector3 EvaluatePathPoint(float phase, float width, float depth, float heightAmp)
+    {
         Vector3 localOffset = new Vector3(
-            pathWidth * Mathf.Sin(omegaT),
-            heightAmplitude * Mathf.Sin(omegaT * heightFrequency)
-            + heightAmplitude * 0.35f * Mathf.Sin(omegaT * heightFrequency * 2.3f + 1.1f),
-            pathDepth * Mathf.Sin(2f * omegaT));
+            width * Mathf.Sin(phase),
+            heightAmp * Mathf.Sin(phase * heightFrequency)
+            + heightAmp * 0.35f * Mathf.Sin(phase * heightFrequency * 2.3f + 1.1f),
+            depth * Mathf.Sin(2f * phase));
 
-        Quaternion pathRotation = Quaternion.Euler(0f, pathYawDegrees, 0f);
-        Vector3 offset = pathRotation * localOffset;
-
-        if (flightCenterAnchor != null)
+        if (constrainToFlightBounds
+            && TryGetFlightBounds(out Vector3 center, out Quaternion rotation, out _))
         {
-            flightCenter = flightCenterAnchor.position;
+            return center + rotation * localOffset;
         }
 
-        Vector3 targetPos = flightCenter + offset;
-        transform.position = Vector3.Lerp(transform.position, targetPos, 1f - Mathf.Exp(-8f * Time.deltaTime));
+        return flightCenter + Quaternion.Euler(0f, pathYawDegrees, 0f) * localOffset;
+    }
 
+    private Vector3 EvaluatePathTangent(float phase, float width, float depth, float heightAmp)
+    {
         Vector3 localTangent = new Vector3(
-            pathWidth * Mathf.Cos(omegaT),
-            heightAmplitude * heightFrequency * Mathf.Cos(omegaT * heightFrequency)
-            + heightAmplitude * 0.35f * heightFrequency * 2.3f
-              * Mathf.Cos(omegaT * heightFrequency * 2.3f + 1.1f),
-            pathDepth * 2f * Mathf.Cos(2f * omegaT));
+            width * Mathf.Cos(phase),
+            heightAmp * heightFrequency * Mathf.Cos(phase * heightFrequency)
+            + heightAmp * 0.35f * heightFrequency * 2.3f
+              * Mathf.Cos(phase * heightFrequency * 2.3f + 1.1f),
+            depth * 2f * Mathf.Cos(2f * phase));
 
-        Vector3 tangent = pathRotation * localTangent;
-
-        if (tangent.sqrMagnitude < 1e-6f)
+        if (constrainToFlightBounds && TryGetFlightBounds(out _, out Quaternion rotation, out _))
         {
-            tangent = transform.position - lastFlightPosition;
+            return rotation * localTangent;
         }
 
-        if (tangent.sqrMagnitude < 1e-6f)
+        return Quaternion.Euler(0f, pathYawDegrees, 0f) * localTangent;
+    }
+
+    /// <summary>
+    /// Walk backward along the figure-8 until arc length ≈ body length.
+    /// </summary>
+    private Vector3 FindPathPointBehind(
+        float headPhase, float arcLength, float width, float depth, float heightAmp)
+    {
+        if (arcLength <= 0.01f)
         {
-            tangent = -Vector3.forward;
+            return EvaluatePathPoint(headPhase, width, depth, heightAmp);
         }
 
-        tangent.Normalize();
+        float phase = headPhase;
+        float traveled = 0f;
+        Vector3 prev = EvaluatePathPoint(phase, width, depth, heightAmp);
+        const float step = 0.025f;
+        const int maxSteps = 800;
 
-        float pitch = pitchAmplitude * Mathf.Sin(omegaT * pitchFrequency)
-                      * Mathf.Sin(omegaT * pitchWobbleFrequency + 0.6f);
-        Quaternion face = Quaternion.LookRotation(tangent, Vector3.up)
-                          * Quaternion.Euler(0f, modelYawOffsetDegrees, 0f);
-        Quaternion pitchRot = Quaternion.AngleAxis(pitch, face * Vector3.right);
-        Quaternion targetRot = pitchRot * face;
-        transform.rotation = Quaternion.Slerp(
-            transform.rotation,
-            targetRot,
-            1f - Mathf.Exp(-6f * Time.deltaTime));
+        for (int i = 0; i < maxSteps; i++)
+        {
+            phase -= step;
+            Vector3 point = EvaluatePathPoint(phase, width, depth, heightAmp);
+            float seg = Vector3.Distance(prev, point);
+            if (seg < 1e-6f)
+            {
+                prev = point;
+                continue;
+            }
 
-        lastFlightPosition = transform.position;
+            if (traveled + seg >= arcLength)
+            {
+                float t = (arcLength - traveled) / seg;
+                return Vector3.Lerp(prev, point, t);
+            }
+
+            traveled += seg;
+            prev = point;
+        }
+
+        return prev;
     }
 
     private void ResolveVisualScaleRoot()
@@ -1772,6 +2201,43 @@ public class DragonBoss : MonoBehaviour
     {
         Gizmos.color = new Color(1f, 0.35f, 1f, 0.95f);
         Gizmos.DrawWireSphere(ShieldAttachPoint, 0.22f);
+
+        Vector3 leadLocal = flightLead != null
+            ? transform.InverseTransformPoint(flightLead.position)
+            : Vector3.forward * flightLeadDistance;
+        Vector3 tailLocal = flightTail != null
+            ? transform.InverseTransformPoint(flightTail.position)
+            : Vector3.back * flightTailDistance;
+
+        Vector3 leadWorld = transform.TransformPoint(leadLocal);
+        Vector3 tailWorld = transform.TransformPoint(tailLocal);
+
+        Gizmos.color = new Color(0.2f, 0.9f, 1f, 0.95f);
+        Gizmos.DrawWireSphere(leadWorld, 0.18f);
+        Gizmos.color = new Color(1f, 0.55f, 0.15f, 0.95f);
+        Gizmos.DrawWireSphere(tailWorld, 0.18f);
+        Gizmos.color = Color.white;
+        Gizmos.DrawLine(tailWorld, leadWorld);
+
+        if (TryGetFlightBounds(out Vector3 center, out Quaternion rotation, out Vector3 halfExtents))
+        {
+            Matrix4x4 old = Gizmos.matrix;
+            Gizmos.matrix = Matrix4x4.TRS(center, rotation, Vector3.one);
+            Gizmos.color = new Color(0.3f, 1f, 0.45f, 0.9f);
+            Gizmos.DrawWireCube(Vector3.zero, halfExtents * 2f);
+            Gizmos.color = new Color(0.3f, 1f, 0.45f, 0.12f);
+            Gizmos.DrawCube(Vector3.zero, halfExtents * 2f);
+
+            // Fireball spawn band: center fraction of bounds X (full Y/Z of the box).
+            float frac = Mathf.Clamp(fireballSpawnCenterXFraction, 0.1f, 1f);
+            Vector3 spawnSize = new Vector3(halfExtents.x * 2f * frac, halfExtents.y * 2f, halfExtents.z * 2f);
+            Gizmos.color = new Color(1f, 0.92f, 0.15f, 0.95f);
+            Gizmos.DrawWireCube(Vector3.zero, spawnSize);
+            Gizmos.color = new Color(1f, 0.92f, 0.15f, 0.1f);
+            Gizmos.DrawCube(Vector3.zero, spawnSize);
+
+            Gizmos.matrix = old;
+        }
     }
 
 #if UNITY_EDITOR
@@ -1789,9 +2255,7 @@ public class DragonBoss : MonoBehaviour
         if (existing != null)
         {
             shieldAttach = existing;
-#if UNITY_EDITOR
             UnityEditor.Selection.activeGameObject = existing.gameObject;
-#endif
             return;
         }
 
@@ -1808,13 +2272,141 @@ public class DragonBoss : MonoBehaviour
         shieldAttach = anchor.transform;
         shieldAttachLocalOffset = Vector3.zero;
 
-#if UNITY_EDITOR
         UnityEditor.Selection.activeGameObject = anchor;
         UnityEditor.EditorUtility.SetDirty(this);
-#endif
         Debug.Log(
             "DragonBoss: ShieldAttach placed at visual center. Move it in Scene view "
             + "so crystal beams aim inside the dragon.",
+            this);
+    }
+
+    [ContextMenu("Create Flight Markers (Head + Tail)")]
+    public void CreateFlightMarkers()
+    {
+        Vector3 axis = transform.forward;
+        Vector3 leadWorld = transform.position + axis * flightLeadDistance;
+        Vector3 tailWorld = transform.position - axis * flightTailDistance;
+
+        if (TryGetVisualBounds(out Bounds bounds, includeWhenDisabled: true))
+        {
+            Vector3 localFwd = transform.InverseTransformDirection(axis);
+            float along = Mathf.Abs(localFwd.x) * bounds.extents.x
+                          + Mathf.Abs(localFwd.y) * bounds.extents.y
+                          + Mathf.Abs(localFwd.z) * bounds.extents.z;
+            along = Mathf.Max(along, 0.5f);
+            leadWorld = bounds.center + axis * along;
+            tailWorld = bounds.center - axis * along;
+        }
+
+        flightLead = EnsureChildMarker("FlightLead", leadWorld);
+        flightTail = EnsureChildMarker("FlightTail", tailWorld);
+        CacheFlightMarkers();
+
+        UnityEditor.Selection.activeGameObject = flightLead.gameObject;
+        UnityEditor.EditorUtility.SetDirty(this);
+        Debug.Log(
+            "DragonBoss: FlightLead (cyan) + FlightTail (orange) created. "
+            + "Move them to snout and tail tip — body length "
+            + flightBodyLength.ToString("0.00") + "m drives path sizing and rotation.",
+            this);
+    }
+
+    private Transform EnsureChildMarker(string markerName, Vector3 worldPosition)
+    {
+        Transform existing = transform.Find(markerName);
+        if (existing != null)
+        {
+            existing.position = worldPosition;
+            return existing;
+        }
+
+        GameObject go = new GameObject(markerName);
+        go.transform.SetParent(transform, true);
+        go.transform.position = worldPosition;
+        go.transform.localRotation = Quaternion.identity;
+        return go.transform;
+    }
+
+    [ContextMenu("Create Fight Audio")]
+    public void CreateFightAudio()
+    {
+        FightAudio existing = GetComponent<FightAudio>();
+        if (existing == null)
+        {
+            existing = FindObjectOfType<FightAudio>();
+        }
+
+        if (existing != null)
+        {
+            UnityEditor.Selection.activeGameObject = existing.gameObject;
+            Debug.Log("FightAudio already exists — select it and assign AudioClips.", existing);
+            return;
+        }
+
+        FightAudio audio = gameObject.AddComponent<FightAudio>();
+        UnityEditor.Selection.activeGameObject = gameObject;
+        UnityEditor.EditorUtility.SetDirty(this);
+        Debug.Log(
+            "FightAudio added. Assign clips: Arrow Shot, Shield Bounce, Dragon Hurt[] / Death, "
+            + "Fireball Shoot/Explode, Crystal Explode, Dragon Flaps[]. Tune Flap Interval to match wing anim.",
+            audio);
+    }
+
+    [ContextMenu("Create Flight Bounds")]
+    public void CreateFlightBounds()
+    {
+        Transform existing = null;
+        if (transform.parent != null)
+        {
+            existing = transform.parent.Find("FlightBounds");
+        }
+
+        if (existing == null)
+        {
+            GameObject found = GameObject.Find("FlightBounds");
+            if (found != null)
+            {
+                existing = found.transform;
+            }
+        }
+
+        if (existing != null)
+        {
+            flightBounds = existing;
+            constrainToFlightBounds = true;
+            UnityEditor.Selection.activeGameObject = existing.gameObject;
+            UnityEditor.EditorUtility.SetDirty(this);
+            return;
+        }
+
+        Vector3 center = flightCenterAnchor != null ? flightCenterAnchor.position : transform.position;
+        GameObject go = new GameObject("FlightBounds");
+        if (transform.parent != null)
+        {
+            go.transform.SetParent(transform.parent, true);
+        }
+
+        go.transform.position = center;
+        go.transform.rotation = Quaternion.Euler(0f, pathYawDegrees, 0f);
+
+        BoxCollider box = go.AddComponent<BoxCollider>();
+        box.isTrigger = true;
+        // Default arena-sized box — scale in the Scene view to taste.
+        box.size = new Vector3(
+            Mathf.Max(6f, pathWidth * 2.2f),
+            Mathf.Max(3f, heightAmplitude * 3f),
+            Mathf.Max(5f, pathDepth * 2.2f));
+        box.center = Vector3.zero;
+
+        flightBounds = go.transform;
+        constrainToFlightBounds = true;
+        autoFitPathToBody = false;
+
+        UnityEditor.Selection.activeGameObject = go;
+        UnityEditor.EditorUtility.SetDirty(this);
+        Debug.Log(
+            "DragonBoss: FlightBounds created (green box). Scale the BoxCollider size "
+            + "so the dragon stays inside that volume.",
             this);
     }
 

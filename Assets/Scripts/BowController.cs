@@ -848,7 +848,9 @@ public class BowController : MonoBehaviour
             Debug.Log($"Bow: shot draw={power:0.00} speed={speed:0.0} dir={dir}.", this);
         }
 
+        Vector3 shotPos = shot.transform.position;
         shot.Fire(dir, speed, damagePerShot, bowColliders);
+        FightAudio.PlayArrowShot(shotPos);
         ResetBowString();
 
         if (ShouldAutoSpawnHeldArrow)

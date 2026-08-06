@@ -76,6 +76,43 @@ public class ArrowManager : MonoBehaviour
         Instance.UnregisterInternal(arrow);
     }
 
+    /// <summary>
+    /// Nearest in-flight arrow within <paramref name="radius"/> of <paramref name="worldPosition"/>, or null.
+    /// </summary>
+    public static ArrowProjectile FindNearestInFlight(Vector3 worldPosition, float radius)
+    {
+        if (Instance == null || radius <= 0f)
+        {
+            return null;
+        }
+
+        return Instance.FindNearestInFlightInternal(worldPosition, radius);
+    }
+
+    private ArrowProjectile FindNearestInFlightInternal(Vector3 worldPosition, float radius)
+    {
+        float bestSqr = radius * radius;
+        ArrowProjectile best = null;
+
+        for (int i = 0; i < tracked.Count; i++)
+        {
+            ArrowProjectile arrow = tracked[i].Arrow;
+            if (arrow == null || !arrow.IsInFlight)
+            {
+                continue;
+            }
+
+            float sqr = (arrow.transform.position - worldPosition).sqrMagnitude;
+            if (sqr <= bestSqr)
+            {
+                bestSqr = sqr;
+                best = arrow;
+            }
+        }
+
+        return best;
+    }
+
     private void RegisterInternal(ArrowProjectile arrow)
     {
         for (int i = 0; i < tracked.Count; i++)

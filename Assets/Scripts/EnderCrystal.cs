@@ -130,6 +130,7 @@ public class EnderCrystal : MonoBehaviour
 
         destroyed = true;
         Destroy(arrow.gameObject);
+        FightAudio.PlayCrystalExplode(transform.position);
 
         if (beam != null)
         {
