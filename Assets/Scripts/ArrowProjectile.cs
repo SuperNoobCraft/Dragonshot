@@ -35,11 +35,13 @@ public class ArrowProjectile : MonoBehaviour
     [Tooltip("Damage applied when this arrow hits a dragon (set from BowController on fire).")]
     [SerializeField, Min(1)] private int damage = 1;
     [SerializeField] private bool stickOnHit = true;
-    [Tooltip("Layers that stop and pin the arrow. Leave empty to stick on any layer.")]
+    [Tooltip("Layers the arrow can stick into. Empty / Nothing = stick to everything.")]
     [SerializeField] private LayerMask stickLayers;
     [SerializeField] private float lifeSeconds = 12f;
     [Tooltip("If true, arrow stays in world space when stuck (avoids ground scale twisting the shaft).")]
     [SerializeField] private bool stickInWorldSpace = true;
+    [Tooltip("Sphere-cast radius used to pin the tip into solids (more reliable than collision alone).")]
+    [SerializeField, Min(0.005f)] private float stickProbeRadius = 0.025f;
 
     [Header("Flight Trail")]
     [Tooltip("Leave a visible path while the arrow is in the air (helps at distance).")]
@@ -65,6 +67,7 @@ public class ArrowProjectile : MonoBehaviour
     private Vector3 lastAirVelocity = Vector3.forward;
     private Quaternion stuckRotation = Quaternion.identity;
     private bool dragonHitHandled;
+    private static PhysicMaterial sharedNoBounceMaterial;
 
     /// <summary>
     /// Prevents the same arrow from registering twice (arrow collider + dragon mesh relay).
@@ -121,6 +124,14 @@ public class ArrowProjectile : MonoBehaviour
         body.interpolation = RigidbodyInterpolation.Interpolate;
         body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
         selfColliders = GetComponentsInChildren<Collider>(true);
+        ApplyNoBounceMaterial();
+        // Prefab had stickLayers=128 (layer 7 only), so Default ground/pillars never stuck.
+        // Nothing (0) and Everything (~0) both mean "stick to any solid".
+        if (stickLayers.value != 0 && stickLayers.value != ~0)
+        {
+            stickLayers = ~0;
+        }
+
         restLocalPos = transform.localPosition;
         restLocalRot = transform.localRotation;
         ResolveMarkers();
@@ -214,32 +225,90 @@ public class ArrowProjectile : MonoBehaviour
         Vector3 velocity = body.velocity;
         float speedSqr = velocity.sqrMagnitude;
         float minSqr = alignMinSpeed * alignMinSpeed;
-        if (speedSqr < minSqr)
+        if (speedSqr >= minSqr)
+        {
+            // Cache free-flight velocity only — once we scrape the ground, velocity
+            // goes nearly horizontal and would bake a flat stick pose.
+            lastAirVelocity = velocity;
+
+            if (alignToVelocity)
+            {
+                Quaternion target = RotationForDirection(velocity);
+                if (alignSmoothing <= 0.01f)
+                {
+                    body.MoveRotation(target);
+                }
+                else
+                {
+                    float t = 1f - Mathf.Exp(-alignSmoothing * Time.fixedDeltaTime);
+                    body.MoveRotation(Quaternion.Slerp(body.rotation, target, t));
+                }
+
+                body.angularVelocity = Vector3.zero;
+            }
+        }
+
+        TryStickViaSweep(velocity);
+    }
+
+    /// <summary>
+    /// Pin into solids along flight path. More reliable than OnCollisionEnter alone
+    /// (fast arrows / glancing ground hits often bounce or slide without a stick message).
+    /// </summary>
+    private void TryStickViaSweep(Vector3 velocity)
+    {
+        if (!stickOnHit || stuck || !flying)
         {
             return;
         }
 
-        // Cache free-flight velocity only — once we scrape the ground, velocity
-        // goes nearly horizontal and would bake a flat stick pose.
-        lastAirVelocity = velocity;
-
-        if (!alignToVelocity)
+        float speed = velocity.magnitude;
+        if (speed < 0.15f)
         {
             return;
         }
 
-        Quaternion target = RotationForDirection(velocity);
-        if (alignSmoothing <= 0.01f)
+        Vector3 direction = velocity / speed;
+        Vector3 tip = arrowTip != null ? arrowTip.position : body.position;
+        float castDistance = speed * Time.fixedDeltaTime + stickProbeRadius * 2f;
+
+        int mask = StickLayerMask;
+        if (!Physics.SphereCast(
+                tip - direction * stickProbeRadius,
+                stickProbeRadius,
+                direction,
+                out RaycastHit hit,
+                castDistance,
+                mask,
+                QueryTriggerInteraction.Ignore))
         {
-            body.MoveRotation(target);
-        }
-        else
-        {
-            float t = 1f - Mathf.Exp(-alignSmoothing * Time.fixedDeltaTime);
-            body.MoveRotation(Quaternion.Slerp(body.rotation, target, t));
+            return;
         }
 
-        body.angularVelocity = Vector3.zero;
+        if (hit.collider == null || hit.collider.transform.IsChildOf(transform))
+        {
+            return;
+        }
+
+        if (IsTemporarilyIgnoredCollider(hit.collider))
+        {
+            return;
+        }
+
+        DragonBoss dragon = hit.collider.GetComponentInParent<DragonBoss>();
+        if (dragon != null)
+        {
+            // Let collision / relay deal damage; don't pin into the dragon mesh.
+            return;
+        }
+
+        if (hit.collider.GetComponentInParent<EnderCrystal>() != null)
+        {
+            // Crystal destroys the arrow on its own hit callback.
+            return;
+        }
+
+        Stick(hit.point, direction, hit.collider.transform);
     }
 
     /// <summary>
@@ -383,6 +452,7 @@ public class ArrowProjectile : MonoBehaviour
         body.drag = airDrag;
         body.angularDrag = 0.05f;
         body.interpolation = RigidbodyInterpolation.Interpolate;
+        body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
         body.velocity = direction * speed;
         body.angularVelocity = Vector3.zero;
         body.WakeUp();
@@ -450,11 +520,6 @@ public class ArrowProjectile : MonoBehaviour
             return;
         }
 
-        if (Time.time < clearIgnoreAt)
-        {
-            return;
-        }
-
         if (TryHandleDragonHit(collision))
         {
             return;
@@ -470,7 +535,32 @@ public class ArrowProjectile : MonoBehaviour
             return;
         }
 
+        // Only skip the bow/hand colliders we temporarily ignore — do NOT skip
+        // all world hits during that window (that made nearby solids bounce).
+        if (IsTemporarilyIgnoredCollider(collision.collider))
+        {
+            return;
+        }
+
         Stick(collision);
+    }
+
+    private bool IsTemporarilyIgnoredCollider(Collider other)
+    {
+        if (other == null || temporarilyIgnored == null || Time.time >= clearIgnoreAt)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < temporarilyIgnored.Length; i++)
+        {
+            if (temporarilyIgnored[i] == other)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private bool TryHandleDragonHit(Collision collision)
@@ -489,21 +579,22 @@ public class ArrowProjectile : MonoBehaviour
         return dragon.HandleArrowCollision(this);
     }
 
+    private int StickLayerMask
+    {
+        get
+        {
+            // 0 (Nothing) = stick to everything. Restrictive prefab masks are cleared in Awake.
+            return stickLayers.value == 0 ? ~0 : stickLayers.value;
+        }
+    }
+
     private bool IsStickLayer(int layer)
     {
-        // Empty mask = stick to anything.
-        if (stickLayers.value == 0)
-        {
-            return true;
-        }
-
-        return ((1 << layer) & stickLayers) != 0;
+        return ((1 << layer) & StickLayerMask) != 0;
     }
 
     private void Stick(Collision collision)
     {
-        // Incident direction from last free-flight sample (pre-scrape), not the
-        // post-contact horizontal velocity that makes the shaft look flat.
         Vector3 impactDir = lastAirVelocity;
         if (impactDir.sqrMagnitude < 1e-4f && collision != null)
         {
@@ -517,13 +608,38 @@ public class ArrowProjectile : MonoBehaviour
 
         impactDir.Normalize();
 
+        Vector3 contactPoint = body != null ? body.position : transform.position;
+        Transform hitParent = null;
+        if (collision != null && collision.contactCount > 0)
+        {
+            ContactPoint contact = collision.GetContact(0);
+            contactPoint = contact.point;
+            hitParent = collision.transform;
+        }
+
+        Stick(contactPoint, impactDir, hitParent);
+    }
+
+    private void Stick(Vector3 contactPoint, Vector3 impactDir, Transform hitParent)
+    {
+        if (stuck || !flying)
+        {
+            return;
+        }
+
+        if (impactDir.sqrMagnitude < 1e-6f)
+        {
+            impactDir = TipWorldDirection;
+        }
+
+        impactDir.Normalize();
+
         Quaternion impactRotation = RotationForDirection(impactDir);
         stuckRotation = impactRotation;
 
         flying = false;
         stuck = true;
         ClearIgnore();
-        // Stop drawing new segments; existing trail fades out via trailTime.
         SetTrailEmitting(false, clear: false);
 
         if (body == null)
@@ -538,27 +654,55 @@ public class ArrowProjectile : MonoBehaviour
         body.freezeRotation = true;
         body.isKinematic = true;
 
-        Vector3 impactPosition = body.position;
         transform.SetParent(null, true);
-        transform.SetPositionAndRotation(impactPosition, impactRotation);
+        transform.rotation = impactRotation;
 
-        // After rotation is correct, slide so the tip sits on the contact point.
-        if (collision != null && collision.contactCount > 0 && arrowTip != null)
+        Vector3 impactPosition = contactPoint;
+        if (arrowTip != null)
         {
-            ContactPoint contact = collision.GetContact(0);
-            impactPosition += contact.point - arrowTip.position;
-            transform.position = impactPosition;
+            // Move whole arrow so the tip lands on the contact, then embed slightly.
+            impactPosition = transform.position + (contactPoint - arrowTip.position);
+            impactPosition += impactDir * 0.04f;
         }
 
-        body.position = transform.position;
+        transform.position = impactPosition;
+        body.position = impactPosition;
         body.rotation = impactRotation;
 
-        if (!stickInWorldSpace && collision != null)
+        if (!stickInWorldSpace && hitParent != null)
         {
-            transform.SetParent(collision.transform, true);
+            transform.SetParent(hitParent, true);
             transform.SetPositionAndRotation(impactPosition, impactRotation);
             body.position = impactPosition;
             body.rotation = impactRotation;
+        }
+    }
+
+    private void ApplyNoBounceMaterial()
+    {
+        if (selfColliders == null || selfColliders.Length == 0)
+        {
+            return;
+        }
+
+        if (sharedNoBounceMaterial == null)
+        {
+            sharedNoBounceMaterial = new PhysicMaterial("ArrowNoBounce")
+            {
+                dynamicFriction = 0.4f,
+                staticFriction = 0.4f,
+                bounciness = 0f,
+                frictionCombine = PhysicMaterialCombine.Average,
+                bounceCombine = PhysicMaterialCombine.Minimum
+            };
+        }
+
+        for (int i = 0; i < selfColliders.Length; i++)
+        {
+            if (selfColliders[i] != null)
+            {
+                selfColliders[i].sharedMaterial = sharedNoBounceMaterial;
+            }
         }
     }
 

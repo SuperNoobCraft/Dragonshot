@@ -259,6 +259,117 @@ public class PlayEnvironment : MonoBehaviour
         return ResolveHeadTransform(allowSynchronizerFallback: true);
     }
 
+    /// <summary>
+    /// CAVE right-hand / wand host: vGear → Frame → User → Head → Hand → Controller.
+    /// </summary>
+    public static Transform ResolveRightHandTransform()
+    {
+        Transform vGear = ResolveVGearTransform();
+        if (vGear != null)
+        {
+            Transform controller = FindChildPathIgnoreCase(
+                vGear, "Frame", "User", "Head", "Hand", "Controller");
+            if (controller != null)
+            {
+                return controller;
+            }
+
+            Transform headHand = FindChildPathIgnoreCase(vGear, "Frame", "User", "Head", "Hand");
+            if (headHand != null)
+            {
+                return headHand;
+            }
+
+            controller = FindChildPathIgnoreCase(vGear, "Frame", "User", "Hand", "Controller");
+            if (controller != null)
+            {
+                return controller;
+            }
+        }
+
+        Transform hand1 = FindSceneTransformByName("Hand1");
+        if (hand1 != null)
+        {
+            return hand1;
+        }
+
+        try
+        {
+            if (vCast.hand != null)
+            {
+                return vCast.hand.transform;
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Keep the Votanic wand laser off (reapplied every frame by vCast).
+    /// </summary>
+    public static void SuppressWandRay()
+    {
+        try
+        {
+            if (vCast.controller != null)
+            {
+                vCast.controller.DisplayWandRay(false);
+                vCast.controller.EnableWandRay(false);
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        Transform vGear = ResolveVGearTransform();
+        if (vGear == null)
+        {
+            return;
+        }
+
+        Transform wand = FindChildPathIgnoreCase(
+            vGear, "Frame", "User", "Head", "Hand", "Controller", "Wand");
+        if (wand == null)
+        {
+            wand = FindChildPathIgnoreCase(vGear, "Frame", "User", "Hand", "Controller", "Wand");
+        }
+
+        if (wand == null)
+        {
+            wand = FindSceneTransformByName("Wand");
+        }
+
+        if (wand == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < wand.childCount; i++)
+        {
+            Transform child = wand.GetChild(i);
+            if (!IsWandVisualName(child.name))
+            {
+                continue;
+            }
+
+            if (child.gameObject.activeSelf)
+            {
+                child.gameObject.SetActive(false);
+            }
+        }
+    }
+
+    private static bool IsWandVisualName(string name)
+    {
+        return string.Equals(name, "Beam", StringComparison.OrdinalIgnoreCase)
+               || string.Equals(name, "Point", StringComparison.OrdinalIgnoreCase)
+               || string.Equals(name, "Ring", StringComparison.OrdinalIgnoreCase)
+               || string.Equals(name, "Cursor", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static Transform ResolveHeadTransform(bool allowSynchronizerFallback)
     {
         Transform vision = ResolveVisionTransform();

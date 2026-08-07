@@ -45,6 +45,9 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private DragonFightUI fightUI;
     [Tooltip("If true, fight waits for the world-space Start button.")]
     [SerializeField] private bool requireStartButton = true;
+    [Tooltip("Pick up bow + back quiver to begin (see DragonFightEquipStart).")]
+    [SerializeField] private bool useEquipStart = true;
+    [SerializeField] private DragonFightEquipStart equipStart;
 
     [Header("Model / Animation")]
     [Tooltip("Optional Animator on the Sketchfab mesh (fly / wing flap). Auto-finds in children if empty.")]
@@ -190,6 +193,7 @@ public class DragonBoss : MonoBehaviour
     public bool IsShielded => phase == FightPhase.Playing && shieldUp && !dead && !isDying;
     public bool IsDead => dead;
     public bool IsFightActive => phase == FightPhase.Playing && !dead && !isDying;
+    public bool IsWaitingForStart => phase == FightPhase.Waiting;
     public bool ShouldShowCrystalShieldVisual =>
         (phase == FightPhase.Waiting || phase == FightPhase.Playing)
         && !dead && !isDying
@@ -269,6 +273,11 @@ public class DragonBoss : MonoBehaviour
         {
             fightUI.Bind(this);
         }
+
+        if (equipStart == null && useEquipStart)
+        {
+            equipStart = FindObjectOfType<DragonFightEquipStart>();
+        }
     }
 
     private void Start()
@@ -284,6 +293,7 @@ public class DragonBoss : MonoBehaviour
         }
 
         CollectCrystals();
+        FixCrystalPillarColliders();
         CacheBodyVisualMaterials();
 
         if (requireStartButton)
@@ -430,7 +440,14 @@ public class DragonBoss : MonoBehaviour
 
         if (fightUI != null)
         {
-            fightUI.ShowStart();
+            if (useEquipStart && equipStart != null)
+            {
+                equipStart.ResetForWaiting();
+            }
+            else
+            {
+                fightUI.ShowStart();
+            }
         }
     }
 
@@ -2688,9 +2705,212 @@ public class DragonBoss : MonoBehaviour
         Debug.Log("Created DragonFightUI. Move it in the Scene view.", panel);
     }
 
+    [ContextMenu("Create Equip Start (Bow + Quiver Tutorial)")]
+    public void CreateEquipStart()
+    {
+#if UNITY_EDITOR
+        DragonFightEquipStart existing = FindObjectOfType<DragonFightEquipStart>();
+        if (existing != null)
+        {
+            equipStart = existing;
+            UnityEditor.Selection.activeGameObject = existing.gameObject;
+            Debug.Log("DragonFightEquipStart already exists — selected it.", existing);
+            return;
+        }
+
+        BowController bow = FindObjectOfType<BowController>();
+        GameObject root = new GameObject("DragonFightEquipStart");
+        DragonFightEquipStart equip = root.AddComponent<DragonFightEquipStart>();
+
+        Transform bowAnchor = null;
+        Transform quiverAnchor = null;
+        GameObject groundBowProp = null;
+        GameObject groundQuiverProp = null;
+        Transform heldQuiver = null;
+
+        if (bow != null)
+        {
+            GameObject bowAnchorGo = new GameObject("GroundBowAnchor");
+            bowAnchorGo.transform.SetPositionAndRotation(bow.transform.position, bow.transform.rotation);
+            bowAnchorGo.transform.SetParent(root.transform, true);
+            bowAnchor = bowAnchorGo.transform;
+
+            groundBowProp = UnityEngine.Object.Instantiate(bow.gameObject);
+            groundBowProp.name = "GroundBowVisual";
+            groundBowProp.transform.SetPositionAndRotation(bowAnchor.position, bowAnchor.rotation);
+            groundBowProp.transform.SetParent(root.transform, true);
+            StripPlayableBowComponents(groundBowProp);
+
+            GameObject quiverAnchorGo = new GameObject("GroundQuiverAnchor");
+            quiverAnchorGo.transform.SetPositionAndRotation(
+                bowAnchor.position + bowAnchor.right * 0.85f + Vector3.up * 0.05f,
+                bowAnchor.rotation);
+            quiverAnchorGo.transform.SetParent(root.transform, true);
+            quiverAnchor = quiverAnchorGo.transform;
+
+            GameObject groundQuiverGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            groundQuiverGo.name = "GroundQuiverVisual";
+            groundQuiverGo.transform.SetPositionAndRotation(quiverAnchor.position, quiverAnchor.rotation);
+            groundQuiverGo.transform.localScale = new Vector3(0.22f, 0.35f, 0.22f);
+            groundQuiverGo.transform.SetParent(root.transform, true);
+            groundQuiverProp = groundQuiverGo;
+            DestroyImmediate(groundQuiverGo.GetComponent<Collider>());
+
+            GameObject heldQuiverGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            heldQuiverGo.name = "HeldQuiverVisual";
+            heldQuiverGo.transform.localScale = new Vector3(0.22f, 0.35f, 0.22f);
+            heldQuiverGo.SetActive(false);
+            heldQuiverGo.transform.SetParent(root.transform, true);
+            heldQuiver = heldQuiverGo.transform;
+            DestroyImmediate(heldQuiverGo.GetComponent<Collider>());
+        }
+
+        equipStart = equip;
+        useEquipStart = true;
+        equip.Assign(
+            this,
+            bow,
+            bow != null ? bow.GetComponent<LeftHandChild>() : null,
+            groundBowProp,
+            groundQuiverProp,
+            heldQuiver,
+            null,
+            bowAnchor,
+            quiverAnchor,
+            fightUI,
+            null);
+        UnityEditor.EditorUtility.SetDirty(equip);
+        UnityEditor.EditorUtility.SetDirty(this);
+        UnityEditor.Selection.activeGameObject = root;
+        Debug.Log(
+            "Created DragonFightEquipStart with GroundBowVisual prop + disabled playable bow until pickup. "
+            + "Assign Instruction Signs on the component.",
+            root);
+#endif
+    }
+
+#if UNITY_EDITOR
+    private static void StripPlayableBowComponents(GameObject go)
+    {
+        BowController bowController = go.GetComponent<BowController>();
+        if (bowController != null)
+        {
+            DestroyImmediate(bowController);
+        }
+
+        LeftHandChild handChild = go.GetComponent<LeftHandChild>();
+        if (handChild != null)
+        {
+            DestroyImmediate(handChild);
+        }
+
+        Collider[] colliders = go.GetComponentsInChildren<Collider>(true);
+        for (int i = 0; i < colliders.Length; i++)
+        {
+            if (colliders[i] != null)
+            {
+                DestroyImmediate(colliders[i]);
+            }
+        }
+    }
+#endif
+
     /// <summary>
     /// Builds a simple stand-in dragon body + 4 pillar crystals around it for layout.
     /// </summary>
+    [ContextMenu("Fix Crystal Pillar Colliders (Capsule → Mesh)")]
+    public void FixCrystalPillarCollidersMenu()
+    {
+        int fixedCount = FixCrystalPillarColliders();
+        Debug.Log("DragonBoss: fixed " + fixedCount + " crystal pillar collider(s).", this);
+    }
+
+    /// <summary>
+    /// Unity cylinder primitives ship with CapsuleColliders (rounded ends). Swap to MeshCollider
+    /// so hitboxes match the flat-capped cylinder mesh.
+    /// </summary>
+    private int FixCrystalPillarColliders()
+    {
+        int fixedCount = 0;
+
+        for (int i = 0; i < crystals.Count; i++)
+        {
+            EnderCrystal crystal = crystals[i];
+            if (crystal == null)
+            {
+                continue;
+            }
+
+            Transform pillar = crystal.transform.parent;
+            if (pillar == null)
+            {
+                continue;
+            }
+
+            if (ReplaceCapsuleWithMeshCollider(pillar.gameObject))
+            {
+                fixedCount++;
+            }
+        }
+
+        // Also catch named pillars that may not be crystal parents yet.
+        for (int i = 1; i <= 8; i++)
+        {
+            GameObject pillar = GameObject.Find("CrystalPillar_" + i);
+            if (pillar == null)
+            {
+                continue;
+            }
+
+            if (ReplaceCapsuleWithMeshCollider(pillar))
+            {
+                fixedCount++;
+            }
+        }
+
+        return fixedCount;
+    }
+
+    private static bool ReplaceCapsuleWithMeshCollider(GameObject go)
+    {
+        if (go == null)
+        {
+            return false;
+        }
+
+        CapsuleCollider capsule = go.GetComponent<CapsuleCollider>();
+        if (capsule == null)
+        {
+            return false;
+        }
+
+        MeshFilter filter = go.GetComponent<MeshFilter>();
+        Mesh mesh = filter != null ? filter.sharedMesh : null;
+        if (mesh == null)
+        {
+            return false;
+        }
+
+        bool wasTrigger = capsule.isTrigger;
+        PhysicMaterial material = capsule.sharedMaterial;
+
+        // Immediate: avoid one frame with both CapsuleCollider + MeshCollider.
+        UnityEngine.Object.DestroyImmediate(capsule);
+
+        MeshCollider meshCol = go.GetComponent<MeshCollider>();
+        if (meshCol == null)
+        {
+            meshCol = go.AddComponent<MeshCollider>();
+        }
+
+        meshCol.sharedMesh = mesh;
+        // Static pillars: non-convex matches the true cylinder (flat caps).
+        meshCol.convex = false;
+        meshCol.isTrigger = wasTrigger;
+        meshCol.sharedMaterial = material;
+        return true;
+    }
+
     [ContextMenu("Create Placeholder Arena (Dragon + 4 Crystals)")]
     public void CreatePlaceholderArena()
     {
@@ -2755,6 +2975,7 @@ public class DragonBoss : MonoBehaviour
             pillar.name = pillarName;
             pillar.transform.position = pillarPos + Vector3.up * (height * 0.5f);
             pillar.transform.localScale = new Vector3(0.7f, height * 0.5f, 0.7f);
+            ReplaceCapsuleWithMeshCollider(pillar);
 
             Renderer pillarRenderer = pillar.GetComponent<Renderer>();
             if (pillarRenderer != null)

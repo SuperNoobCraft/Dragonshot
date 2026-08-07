@@ -2,9 +2,8 @@ using UnityEngine;
 using Votanic.vXR.vCast;
 
 /// <summary>
-/// World-space panel for the dragon fight: Start → live timer → Reset.
-/// Click with mouse (desktop) or wand+trigger (CAVE).
-/// Create via DragonBoss context menu → Create Fight UI Panel.
+/// World-space panel for the dragon fight: instructions → live timer → reset.
+/// All panel copy is editable in the Inspector under Panel Text.
 /// </summary>
 [RequireComponent(typeof(Collider))]
 public class DragonFightUI : MonoBehaviour
@@ -26,7 +25,31 @@ public class DragonFightUI : MonoBehaviour
     [SerializeField] private float characterSize = 0.08f;
     [SerializeField] private Color textColor = Color.white;
 
+    [Header("Panel Text")]
+    [TextArea(2, 3)]
+    [SerializeField] private string startPanelText = "START\nDragon Fight";
+
+    [Header("Equip Tutorial (pre-fight)")]
+    [TextArea(2, 3)]
+    [SerializeField] private string equipStep1PickUpBow = "Step 1\nPick up the bow\nwith your left hand.";
+    [TextArea(2, 3)]
+    [SerializeField] private string equipStep2PickUpQuiver = "Step 2\nPick up the quiver\nwith your right hand.";
+    [TextArea(2, 3)]
+    [SerializeField] private string equipStep3BehindBack = "Step 3\nReach behind your back\nto strap on the quiver.";
+
+    [TextArea(2, 4)]
+    [Tooltip("{0} = seconds left, {1} = current HP, {2} = max HP")]
+    [SerializeField] private string playingTimerText = "TIME {0}\nHP {1}/{2}\n(click to reset)";
+    [TextArea(2, 3)]
+    [Tooltip("{0} = seconds left when the dragon was defeated")]
+    [SerializeField] private string victoryText = "VICTORY\n{0}s left\nRESET";
+    [TextArea(2, 2)]
+    [SerializeField] private string timeoutText = "TIME UP\nRESET";
+    [TextArea(2, 2)]
+    [SerializeField] private string defeatText = "DEFEAT\nHit by fireball\nRESET";
+
     [Header("Interact")]
+    [SerializeField] private bool instructionOnlyBeforeFight = true;
     [SerializeField] private float wandRayDistance = 8f;
     [SerializeField, Range(0.01f, 0.5f)] private float axisDeadzone = 0.08f;
     [SerializeField] private int maxControllersToScan = 4;
@@ -35,6 +58,7 @@ public class DragonFightUI : MonoBehaviour
 
     private PanelState state = PanelState.Start;
     private bool wasTriggerHeld;
+    private bool instructionOnly;
 
     public void Assign(DragonBoss boss, TextMesh textMesh)
     {
@@ -77,6 +101,11 @@ public class DragonFightUI : MonoBehaviour
 
         if (PlayEnvironment.IsDesktopInput)
         {
+            if (instructionOnly && state == PanelState.Start)
+            {
+                return;
+            }
+
             if (Input.GetMouseButtonDown(0) && IsCursorOverPanel())
             {
                 HandleClick();
@@ -84,6 +113,12 @@ public class DragonFightUI : MonoBehaviour
         }
         else
         {
+            if (instructionOnly && state == PanelState.Start)
+            {
+                wasTriggerHeld = IsTriggerHeld();
+                return;
+            }
+
             bool held = IsTriggerHeld();
             bool pressed = held && !wasTriggerHeld;
             wasTriggerHeld = held;
@@ -96,15 +131,42 @@ public class DragonFightUI : MonoBehaviour
 
     public void ShowStart()
     {
+        instructionOnly = false;
         state = PanelState.Start;
-        SetText("START\nDragon Fight");
+        SetText(startPanelText);
+    }
+
+    public void ShowEquipInstructions(string text)
+    {
+        instructionOnly = instructionOnlyBeforeFight;
+        state = PanelState.Start;
+        SetText(text);
+    }
+
+    public void ShowEquipStep(int step)
+    {
+        instructionOnly = instructionOnlyBeforeFight;
+        state = PanelState.Start;
+        switch (step)
+        {
+            case 2:
+                SetText(equipStep2PickUpQuiver);
+                break;
+            case 3:
+                SetText(equipStep3BehindBack);
+                break;
+            default:
+                SetText(equipStep1PickUpBow);
+                break;
+        }
     }
 
     public void ShowTimer(float secondsRemaining, int hp, int maxHp)
     {
+        instructionOnly = false;
         state = PanelState.Playing;
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsRemaining));
-        SetText("TIME " + whole + "\nHP " + hp + "/" + maxHp + "\n(click to reset)");
+        SetText(FormatTemplate(playingTimerText, whole, hp, maxHp));
     }
 
     public void ShowTimer(float secondsRemaining)
@@ -116,19 +178,36 @@ public class DragonFightUI : MonoBehaviour
     {
         state = PanelState.Victory;
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsLeft));
-        SetText("VICTORY\n" + whole + "s left\nRESET");
+        SetText(FormatTemplate(victoryText, whole));
     }
 
     public void ShowTimeout()
     {
         state = PanelState.Timeout;
-        SetText("TIME UP\nRESET");
+        SetText(timeoutText);
     }
 
     public void ShowDefeat()
     {
         state = PanelState.Defeat;
-        SetText("DEFEAT\nHit by fireball\nRESET");
+        SetText(defeatText);
+    }
+
+    private static string FormatTemplate(string template, params object[] args)
+    {
+        if (string.IsNullOrEmpty(template))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return string.Format(template, args);
+        }
+        catch
+        {
+            return template;
+        }
     }
 
     private void HandleClick()
@@ -140,11 +219,14 @@ public class DragonFightUI : MonoBehaviour
 
         if (state == PanelState.Start)
         {
-            dragon.StartFight();
+            if (!instructionOnly)
+            {
+                dragon.StartFight();
+            }
+
             return;
         }
 
-        // Playing / victory / timeout / defeat → reset back to start.
         dragon.ResetFight();
     }
 

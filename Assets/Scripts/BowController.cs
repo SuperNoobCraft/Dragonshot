@@ -65,7 +65,7 @@ public class BowController : MonoBehaviour
 
     [Header("Tracked XR")]
     [SerializeField] private LeftHandChild leftHandChild;
-    [Tooltip("Primary right-hand name. Also tries Head/Hand path under vGear.")]
+    [Tooltip("Primary right-hand name fallback if vGear Head/Hand/Controller is missing.")]
     [SerializeField] private string rightHandName = "Hand1";
     [Tooltip("Start draw when right hand is within this distance of the bow / left hand (meters). Generous on purpose.")]
     [SerializeField] private float nockStartDistance = 0.5f;
@@ -89,8 +89,8 @@ public class BowController : MonoBehaviour
     [SerializeField] private BowAimMode aimMode = BowAimMode.SoftCoupled;
     [Tooltip("SoftCoupled only: 0 = pure bow aim, 1 = pure string-hand shaft aim.")]
     [SerializeField, Range(0f, 1f)] private float softCoupleBlend = 0.3f;
-    [Tooltip("Hide Votanic wand laser while an arrow is in hand (uses DisplayWandRay / EnableWandRay).")]
-    [SerializeField] private bool hideWandRayWhileHoldingArrow = true;
+    [Tooltip("Keep the Votanic wand laser off at all times in tracked XR.")]
+    [SerializeField] private bool suppressWandRay = true;
 
     [Header("Back Quiver")]
     [Tooltip("Used when Arrow Supply Mode is Back Quiver.")]
@@ -126,10 +126,11 @@ public class BowController : MonoBehaviour
     private float nextNockDebugTime;
     private Vector3 bowStringRestLocalPos;
     private bool hasBowStringRest;
-    private bool wandRayForcedHidden;
     private bool loggedDesktopHead;
     private bool rmbWasHeld;
     private float backQuiverDwell;
+    private bool quiverMountedOnBack;
+    private bool bowGrounded;
 
     /// <summary>
     /// Places an editable world-space toggle panel near the bow.
@@ -262,6 +263,43 @@ public class BowController : MonoBehaviour
     public bool IsAlwaysReadyMode => IsInfiniteMode;
 
     public bool IsBackQuiverMode => supplyMode == ArrowSupplyMode.BackQuiver;
+
+    public bool IsQuiverMountedOnBack => quiverMountedOnBack;
+
+    public bool IsRightHandAtBackQuiverZone()
+    {
+        FindRightHand();
+        return IsRightHandAtBackQuiver();
+    }
+
+    public void SetQuiverMountedOnBack(bool mounted)
+    {
+        if (quiverMountedOnBack == mounted)
+        {
+            return;
+        }
+
+        quiverMountedOnBack = mounted;
+        if (mounted)
+        {
+            SetSupplyMode(ArrowSupplyMode.BackQuiver);
+        }
+        else
+        {
+            ClearHeldArrow();
+        }
+
+        UpdateWandRayVisibility();
+    }
+
+    public void SetBowGrounded(bool grounded)
+    {
+        bowGrounded = grounded;
+        if (leftHandChild != null)
+        {
+            leftHandChild.enabled = !grounded && !PlayEnvironment.IsDesktopInput;
+        }
+    }
 
     /// <summary>
     /// Toggle or set infinite auto-arrows vs back-quiver reach pickup.
@@ -432,8 +470,6 @@ public class BowController : MonoBehaviour
     {
         PlayEnvironment.EnvironmentChanged -= RefreshMode;
         CancelDraw();
-        SetWandRayVisible(true);
-        wandRayForcedHidden = false;
     }
 
     private void Update()
@@ -502,7 +538,7 @@ public class BowController : MonoBehaviour
 
         if (leftHandChild != null)
         {
-            leftHandChild.enabled = !desktop;
+            leftHandChild.enabled = !desktop && !bowGrounded;
         }
 
         if (desktop)
@@ -695,97 +731,12 @@ public class BowController : MonoBehaviour
 
     private void UpdateWandRayVisibility()
     {
-        if (!hideWandRayWhileHoldingArrow)
+        if (!suppressWandRay)
         {
             return;
         }
 
-        bool wantHidden = HasArrowInHand;
-        if (wantHidden)
-        {
-            SetWandRayVisible(false);
-            wandRayForcedHidden = true;
-        }
-        else if (wandRayForcedHidden)
-        {
-            SetWandRayVisible(true);
-            wandRayForcedHidden = false;
-        }
-    }
-
-    private void SetWandRayVisible(bool visible)
-    {
-        // 1) Official API — Votanic reapplies wand display every frame, so we must call this
-        //    from LateUpdate (order 1000) every frame while the arrow is held.
-        try
-        {
-            if (vCast.controller != null)
-            {
-                vCast.controller.DisplayWandRay(visible);
-                vCast.controller.EnableWandRay(visible);
-            }
-        }
-        catch (System.Exception exception)
-        {
-            if (logInputDetection && Time.frameCount % 180 == 0)
-            {
-                Debug.LogWarning("BowController: DisplayWandRay failed: " + exception.Message, this);
-            }
-        }
-
-        // 2) Hierarchy backup: Head/Hand/Controller/Wand/{Beam,Point,Ring}
-        Transform wand = ResolveWandTransform();
-        if (wand == null)
-        {
-            return;
-        }
-
-        for (int i = 0; i < wand.childCount; i++)
-        {
-            Transform child = wand.GetChild(i);
-            if (!IsWandVisualName(child.name))
-            {
-                continue;
-            }
-
-            if (child.gameObject.activeSelf != visible)
-            {
-                child.gameObject.SetActive(visible);
-            }
-        }
-    }
-
-    private static bool IsWandVisualName(string name)
-    {
-        return string.Equals(name, "Beam", System.StringComparison.OrdinalIgnoreCase)
-               || string.Equals(name, "Point", System.StringComparison.OrdinalIgnoreCase)
-               || string.Equals(name, "Ring", System.StringComparison.OrdinalIgnoreCase)
-               || string.Equals(name, "Cursor", System.StringComparison.OrdinalIgnoreCase);
-    }
-
-    private Transform ResolveWandTransform()
-    {
-        Transform head = PlayEnvironment.ResolveDesktopBowParent();
-        if (head != null)
-        {
-            Transform byPath = FindChildPathIgnoreCase(head, "Hand", "Controller", "Wand");
-            if (byPath != null)
-            {
-                return byPath;
-            }
-        }
-
-        Transform vGear = PlayEnvironment.ResolveVGearTransform();
-        if (vGear != null)
-        {
-            Transform byPath = FindChildPathIgnoreCase(vGear, "Frame", "User", "Head", "Hand", "Controller", "Wand");
-            if (byPath != null)
-            {
-                return byPath;
-            }
-        }
-
-        return FindByName("Wand");
+        PlayEnvironment.SuppressWandRay();
     }
 
     // -------------------------------------------------------------------------
@@ -866,13 +817,6 @@ public class BowController : MonoBehaviour
         float speed = SpeedFromDraw(power);
         ArrowProjectile shot = arrow;
         arrow = null;
-
-        // Clear wand hide before flight so restore path is clean after shot.
-        if (wandRayForcedHidden)
-        {
-            SetWandRayVisible(true);
-            wandRayForcedHidden = false;
-        }
 
         if (logInputDetection)
         {
@@ -1276,7 +1220,7 @@ public class BowController : MonoBehaviour
 
     private void UpdateBackQuiverPickup()
     {
-        if (!IsBackQuiverMode || arrow != null || arrowPrefab == null || state != State.Idle)
+        if (!IsBackQuiverMode || !quiverMountedOnBack || arrow != null || arrowPrefab == null || state != State.Idle)
         {
             backQuiverDwell = 0f;
             return;
@@ -1394,7 +1338,7 @@ public class BowController : MonoBehaviour
 
     private void TryPickupFromBackQuiver()
     {
-        if (!IsBackQuiverMode || arrow != null || arrowPrefab == null)
+        if (!IsBackQuiverMode || !quiverMountedOnBack || arrow != null || arrowPrefab == null)
         {
             return;
         }
@@ -1432,6 +1376,12 @@ public class BowController : MonoBehaviour
 
     private Transform ResolveRightHandTransform()
     {
+        Transform resolved = PlayEnvironment.ResolveRightHandTransform();
+        if (resolved != null)
+        {
+            return resolved;
+        }
+
         // Prefer explicit right-hand entity. Do NOT fall back to generic "Hand"
         // (that is often the wand host and breaks quiver / nock distance checks).
         Transform hand1 = FindByName(rightHandName)

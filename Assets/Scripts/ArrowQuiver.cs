@@ -304,7 +304,7 @@ public class ArrowQuiver : MonoBehaviour
 
     private bool IsAnyTrackedHandNear()
     {
-        Transform right = bow.RightHandTransform;
+        Transform right = bow.RightHandTransform ?? PlayEnvironment.ResolveRightHandTransform();
         if (right != null && Vector3.Distance(right.position, transform.position) <= interactDistance)
         {
             return true;
