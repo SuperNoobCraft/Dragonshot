@@ -11,7 +11,7 @@ public enum FightDifficulty
 }
 
 /// <summary>
-/// Per-difficulty dragon HP, fight time limit, and fireball pacing (set on DragonBoss).
+/// Per-difficulty dragon HP, fight time, fireball pacing, and flight speed (set on DragonBoss).
 /// </summary>
 [System.Serializable]
 public struct DifficultyFightTuning
@@ -21,4 +21,6 @@ public struct DifficultyFightTuning
     [Min(1f)] public float roundSeconds;
     [Tooltip("Seconds between fireball spawn attempts.")]
     [Min(1f)] public float fireballInterval;
+    [Tooltip("Figure-8 path speed while fighting.")]
+    [Min(0.01f)] public float pathSpeed;
 }

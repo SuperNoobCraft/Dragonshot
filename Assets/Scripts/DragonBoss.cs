@@ -52,26 +52,29 @@ public class DragonBoss : MonoBehaviour
     [Header("Difficulty")]
     [Tooltip("Set by which quiver is strapped on. Easy = fewer towers; Hard = crystal regrow.")]
     [SerializeField] private FightDifficulty difficulty = FightDifficulty.Normal;
-    [Tooltip("HP, time limit, and fireball pacing for Easy.")]
+    [Tooltip("HP, time limit, fireball pacing, and path speed for Easy.")]
     [SerializeField] private DifficultyFightTuning easyTuning = new DifficultyFightTuning
     {
         maxHp = 3,
         roundSeconds = 120f,
-        fireballInterval = 8f
+        fireballInterval = 8f,
+        pathSpeed = 0.35f
     };
-    [Tooltip("HP, time limit, and fireball pacing for Normal. Existing scenes migrate prior values here.")]
+    [Tooltip("HP, time limit, fireball pacing, and path speed for Normal.")]
     [SerializeField] private DifficultyFightTuning normalTuning = new DifficultyFightTuning
     {
         maxHp = 5,
         roundSeconds = 90f,
-        fireballInterval = 5.5f
+        fireballInterval = 5.5f,
+        pathSpeed = 0.35f
     };
-    [Tooltip("HP, time limit, and fireball pacing for Hard.")]
+    [Tooltip("HP, time limit, fireball pacing, and path speed for Hard.")]
     [SerializeField] private DifficultyFightTuning hardTuning = new DifficultyFightTuning
     {
         maxHp = 7,
         roundSeconds = 75f,
-        fireballInterval = 3.5f
+        fireballInterval = 3.5f,
+        pathSpeed = 0.5f
     };
     [Tooltip("How many crystal towers rise on Easy (of the ones in the scene).")]
     [SerializeField, Min(1)] private int easyActivePillarCount = 2;
@@ -149,7 +152,8 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private float pathWidth = 4f;
     [Tooltip("Figure-8 half-depth (Z). Only used when Flight Bounds is empty / constrain is off.")]
     [SerializeField] private float pathDepth = 3f;
-    [SerializeField] private float pathSpeed = 0.28f;
+    [Tooltip("Legacy path speed — now set per difficulty under Difficulty tuning.")]
+    [SerializeField, HideInInspector] private float pathSpeed = 0.35f;
     [Tooltip("Rotate the figure-8 horizontally (degrees). Ignored when Flight Bounds is used (follows box yaw).")]
     [SerializeField] private float pathYawDegrees = 0f;
     [Tooltip("Empty at the snout/head. Path tracks this point. Create via context menu.")]
@@ -174,6 +178,18 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private bool idleFlightWhileWaiting = true;
     [SerializeField] private float idlePathSpeedMultiplier = 0.45f;
 
+    [Header("Overtime Chase")]
+    [Tooltip("When the timer hits 0, fight continues and the dragon peels off the path toward the player.")]
+    [SerializeField] private bool overtimeChaseEnabled = true;
+    [Tooltip("Flight speed multiplier vs normal path speed during overtime chase.")]
+    [SerializeField, Min(1f)] private float overtimeSpeedMultiplier = 2f;
+    [Tooltip("Max heading change while chasing (deg/sec). Like a car: always flies forward and steers.")]
+    [SerializeField, Min(1f)] private float overtimeTurnDegreesPerSecond = 180f;
+    [Tooltip("Instant-kill radius around the player if the dragon body (or snout) reaches them.")]
+    [SerializeField, Min(0.2f)] private float overtimeContactRadius = 1.25f;
+    [Tooltip("Line up on this fraction of Flight Bounds depth (Z) inside the fireball spawn band before charging.")]
+    [SerializeField, Range(0.35f, 1f)] private float overtimeApproachDepthFraction = 0.85f;
+
     [Header("Fireballs")]
     [SerializeField] private bool enableFireballs = true;
     [Tooltip("Mouth / spawn point. Defaults to Flight Lead, then this transform.")]
@@ -187,6 +203,8 @@ public class DragonBoss : MonoBehaviour
     [Tooltip("Only spawn when the mouth is in the center this fraction of Flight Bounds X "
              + "(0.6 = middle 60%). Yellow gizmo when selected.")]
     [SerializeField, Range(0.1f, 1f)] private float fireballSpawnCenterXFraction = 0.6f;
+    [Tooltip("No new fireballs in the last N seconds of the timer (avoids overlapping overtime chase).")]
+    [SerializeField, Min(0f)] private float fireballLockoutBeforeTimerEnd = 5f;
     [Tooltip("Size, colors, outline, explosion — all editable here.")]
     [SerializeField] private DragonFireballSettings fireballSettings = DragonFireballSettings.Default;
 
@@ -225,6 +243,7 @@ public class DragonBoss : MonoBehaviour
     private Vector3 visualScaleRootBaseScale;
     private float nextFireballTime;
     private float nextHitColliderBakeTime;
+    private bool overtimeChase;
     private readonly List<AnimatedHitCollider> animatedHitColliders = new List<AnimatedHitCollider>(4);
 
     private struct AnimatedHitCollider
@@ -263,11 +282,14 @@ public class DragonBoss : MonoBehaviour
     public int MaxHp => ActiveMaxHp;
     public float RoundSeconds => ActiveRoundSeconds;
     public float FireballInterval => ActiveFireballInterval;
+    public float PathSpeed => ActivePathSpeed;
     public float CrystalExplosionRadius => Mathf.Max(0.1f, crystalExplosionRadius);
+    public bool IsOvertimeChase => overtimeChase && IsFightActive;
 
     private int ActiveMaxHp => GetTuning(difficulty).maxHp;
     private float ActiveRoundSeconds => GetTuning(difficulty).roundSeconds;
     private float ActiveFireballInterval => Mathf.Max(1f, GetTuning(difficulty).fireballInterval);
+    private float ActivePathSpeed => Mathf.Max(0.01f, GetTuning(difficulty).pathSpeed);
 
     private DifficultyFightTuning GetTuning(FightDifficulty value)
     {
@@ -290,6 +312,7 @@ public class DragonBoss : MonoBehaviour
             normalTuning.maxHp = Mathf.Max(1, maxHp);
             normalTuning.roundSeconds = Mathf.Max(1f, roundSeconds);
             normalTuning.fireballInterval = Mathf.Max(1f, fireballInterval);
+            normalTuning.pathSpeed = Mathf.Max(0.01f, pathSpeed);
             difficultyTuningMigrated = true;
         }
 
@@ -307,6 +330,21 @@ public class DragonBoss : MonoBehaviour
         if (hardTuning.fireballInterval < 1f)
         {
             hardTuning.fireballInterval = 3.5f;
+        }
+
+        if (easyTuning.pathSpeed < 0.01f)
+        {
+            easyTuning.pathSpeed = 0.35f;
+        }
+
+        if (normalTuning.pathSpeed < 0.01f)
+        {
+            normalTuning.pathSpeed = Mathf.Max(0.01f, pathSpeed > 0.01f ? pathSpeed : 0.35f);
+        }
+
+        if (hardTuning.pathSpeed < 0.01f)
+        {
+            hardTuning.pathSpeed = 0.5f;
         }
     }
 
@@ -531,15 +569,30 @@ public class DragonBoss : MonoBehaviour
 
         if (phase == FightPhase.Playing && !dead && !isDying)
         {
-            timeRemaining -= Time.deltaTime;
-            if (fightUI != null)
+            if (!overtimeChase)
             {
-                fightUI.ShowTimer(timeRemaining, currentHp, ActiveMaxHp);
+                timeRemaining -= Time.deltaTime;
+                if (timeRemaining <= 0f)
+                {
+                    timeRemaining = 0f;
+                    BeginOvertimeChase();
+                }
+            }
+            else
+            {
+                timeRemaining = 0f;
             }
 
-            if (timeRemaining <= 0f)
+            if (fightUI != null)
             {
-                EndFightTimeout();
+                if (overtimeChase)
+                {
+                    fightUI.ShowOvertime(currentHp, ActiveMaxHp);
+                }
+                else
+                {
+                    fightUI.ShowTimer(timeRemaining, currentHp, ActiveMaxHp);
+                }
             }
         }
 
@@ -612,7 +665,7 @@ public class DragonBoss : MonoBehaviour
             Debug.Log(
                 "DragonBoss: difficulty = " + difficulty
                 + " (" + ActiveMaxHp + " HP, " + ActiveRoundSeconds + "s, fireball "
-                + ActiveFireballInterval + "s)",
+                + ActiveFireballInterval + "s, path " + ActivePathSpeed + ")",
                 this);
         }
     }
@@ -633,6 +686,7 @@ public class DragonBoss : MonoBehaviour
 
         isDying = false;
         dead = false;
+        overtimeChase = false;
         timeRemaining = ActiveRoundSeconds;
         currentHp = ActiveMaxHp;
         damageFlashEndTime = 0f;
@@ -717,6 +771,7 @@ public class DragonBoss : MonoBehaviour
         phase = FightPhase.Waiting;
         dead = false;
         isDying = false;
+        overtimeChase = false;
         timeRemaining = ActiveRoundSeconds;
         currentHp = ActiveMaxHp;
         SetAnimatorRunning(true, idleAnimSpeed);
@@ -745,6 +800,33 @@ public class DragonBoss : MonoBehaviour
         }
     }
 
+    private void BeginOvertimeChase()
+    {
+        if (overtimeChase || phase != FightPhase.Playing || dead || isDying)
+        {
+            return;
+        }
+
+        if (!overtimeChaseEnabled)
+        {
+            EndFightTimeout();
+            return;
+        }
+
+        overtimeChase = true;
+        timeRemaining = 0f;
+        SetAnimatorRunning(true, aliveAnimSpeed * overtimeSpeedMultiplier);
+        FightAudio.PlayDragonRoar(ResolveFlightLeadWorldPosition());
+
+        if (logStateChanges)
+        {
+            Debug.Log(
+                "DragonBoss: timer expired — overtime chase (x"
+                + overtimeSpeedMultiplier + " speed).",
+                this);
+        }
+    }
+
     private void EndFightTimeout()
     {
         if (phase != FightPhase.Playing)
@@ -753,6 +835,7 @@ public class DragonBoss : MonoBehaviour
         }
 
         phase = FightPhase.Ended;
+        overtimeChase = false;
         timeRemaining = 0f;
         SetAnimatorRunning(false);
         SetShieldVisible(false);
@@ -774,7 +857,7 @@ public class DragonBoss : MonoBehaviour
     /// <summary>Player was hit by a fireball — fight lost.</summary>
     public void NotifyPlayerHitByFireball(DragonFireball fireball)
     {
-        EndFightDefeat();
+        EndFightDefeat("Hit by fireball");
     }
 
     public void UnregisterFireball(DragonFireball fireball)
@@ -785,7 +868,7 @@ public class DragonBoss : MonoBehaviour
         }
     }
 
-    private void EndFightDefeat()
+    private void EndFightDefeat(string cause = "Hit by fireball")
     {
         if (phase != FightPhase.Playing)
         {
@@ -793,6 +876,7 @@ public class DragonBoss : MonoBehaviour
         }
 
         phase = FightPhase.Ended;
+        overtimeChase = false;
         SetAnimatorRunning(false);
         SetShieldVisible(false);
         shieldUp = false;
@@ -801,18 +885,24 @@ public class DragonBoss : MonoBehaviour
 
         if (fightUI != null)
         {
-            fightUI.ShowDefeat();
+            fightUI.ShowDefeat(cause);
         }
 
         if (logStateChanges)
         {
-            Debug.Log("DragonBoss: defeat — player hit by fireball.", this);
+            Debug.Log("DragonBoss: defeat — " + cause + ".", this);
         }
     }
 
     private void UpdateFireballs()
     {
-        if (!enableFireballs || !IsFightActive)
+        if (!enableFireballs || !IsFightActive || overtimeChase)
+        {
+            return;
+        }
+
+        // Quiet window before overtime so a fireball isn't still inbound with the dragon.
+        if (timeRemaining <= fireballLockoutBeforeTimerEnd)
         {
             return;
         }
@@ -1084,7 +1174,14 @@ public class DragonBoss : MonoBehaviour
 
         if (fightUI != null)
         {
-            fightUI.ShowTimer(timeRemaining, currentHp, ActiveMaxHp);
+            if (overtimeChase)
+            {
+                fightUI.ShowOvertime(currentHp, ActiveMaxHp);
+            }
+            else
+            {
+                fightUI.ShowTimer(timeRemaining, currentHp, ActiveMaxHp);
+            }
         }
 
         if (logStateChanges)
@@ -1122,6 +1219,7 @@ public class DragonBoss : MonoBehaviour
 
         isDying = true;
         dead = true;
+        overtimeChase = false;
         shieldUp = false;
         phase = FightPhase.Ended;
         SetShieldVisible(false);
@@ -1296,8 +1394,14 @@ public class DragonBoss : MonoBehaviour
             return;
         }
 
+        if (overtimeChase && phase == FightPhase.Playing && !dead)
+        {
+            UpdateOvertimeChaseMotion(Time.deltaTime);
+            return;
+        }
+
         float speedMul = phase == FightPhase.Playing ? 1f : idlePathSpeedMultiplier;
-        flightPhase += pathSpeed * speedMul * Time.deltaTime;
+        flightPhase += ActivePathSpeed * speedMul * Time.deltaTime;
 
         ResolveFlightCenter();
 
@@ -1353,6 +1457,108 @@ public class DragonBoss : MonoBehaviour
         hasRootFlightSample = true;
     }
 
+    private void UpdateOvertimeChaseMotion(float dt)
+    {
+        if (dt <= 1e-5f)
+        {
+            return;
+        }
+
+        // Aim the flight lead (nose) at the player's eyes so they see the dragon's face.
+        Vector3 playerPos = PlayEnvironment.ResolvePlayerAimPosition();
+        Vector3 leadPos = ResolveFlightLeadWorldPosition();
+
+        Vector3 heading = GetBodyForwardWorld();
+        if (heading.sqrMagnitude < 1e-6f)
+        {
+            heading = transform.forward;
+        }
+
+        heading.Normalize();
+
+        Vector3 aimPoint = ResolveOvertimeAimPoint(playerPos, leadPos);
+        Vector3 toAim = aimPoint - leadPos;
+        if (toAim.sqrMagnitude > 1e-4f)
+        {
+            float maxRadians = overtimeTurnDegreesPerSecond * Mathf.Deg2Rad * dt;
+            heading = Vector3.RotateTowards(heading, toAim.normalized, maxRadians, 0f);
+            if (heading.sqrMagnitude > 1e-6f)
+            {
+                heading.Normalize();
+            }
+        }
+
+        float speed = Mathf.Max(0.5f, EstimateFlightSpeed() * overtimeSpeedMultiplier);
+        Quaternion face = RotationFromBodyAxis(heading);
+
+        Vector3 newLead = leadPos + heading * speed * dt;
+        Vector3 newRoot = newLead - face * flightLeadLocal;
+        transform.SetPositionAndRotation(newRoot, face);
+
+        lastFlightPosition = newLead;
+        if (hasRootFlightSample)
+        {
+            flightVelocity = (transform.position - lastRootPosition) / dt;
+        }
+
+        lastRootPosition = transform.position;
+        hasRootFlightSample = true;
+
+        TryOvertimeContactKill(playerPos);
+    }
+
+    /// <summary>
+    /// Approach through the fireball spawn band, then drive the nose straight at the player's eyes.
+    /// </summary>
+    private Vector3 ResolveOvertimeAimPoint(Vector3 playerPos, Vector3 leadPos)
+    {
+        if (!TryGetFlightBounds(out Vector3 center, out Quaternion rotation, out Vector3 halfExtents))
+        {
+            return playerPos;
+        }
+
+        float bandHalfX = halfExtents.x * Mathf.Clamp(fireballSpawnCenterXFraction, 0.1f, 1f);
+        Vector3 playerLocal = Quaternion.Inverse(rotation) * (playerPos - center);
+        Vector3 leadLocal = Quaternion.Inverse(rotation) * (leadPos - center);
+
+        // Gate in the fireball band on the player-facing face, at the player's eye height.
+        float zSign = playerLocal.z >= 0f ? 1f : -1f;
+        float gateX = Mathf.Clamp(playerLocal.x, -bandHalfX * 0.85f, bandHalfX * 0.85f);
+        float gateY = Mathf.Clamp(playerLocal.y, -halfExtents.y * 0.95f, halfExtents.y * 0.95f);
+        float gateZ = zSign * halfExtents.z * Mathf.Clamp(overtimeApproachDepthFraction, 0.35f, 1f);
+
+        Vector3 gateWorld = center + rotation * new Vector3(gateX, gateY, gateZ);
+
+        bool inBand = Mathf.Abs(leadLocal.x) <= bandHalfX + 0.75f;
+        bool onPlayerFacingSide = leadLocal.z * zSign > halfExtents.z * 0.2f;
+
+        if (inBand && onPlayerFacingSide)
+        {
+            return playerPos;
+        }
+
+        return gateWorld;
+    }
+
+    private void TryOvertimeContactKill(Vector3 playerPos)
+    {
+        float radius = Mathf.Max(0.2f, overtimeContactRadius);
+        if (IsPointWithinBodyRange(playerPos, radius))
+        {
+            FightAudio.PlayFireballExplode(playerPos);
+            EndFightDefeat("Dragon contact");
+            return;
+        }
+
+        // Snout / lead can reach the player slightly ahead of fat body bounds.
+        Vector3 lead = ResolveFlightLeadWorldPosition();
+        if ((lead - playerPos).sqrMagnitude <= radius * radius)
+        {
+            FightAudio.PlayFireballExplode(playerPos);
+            EndFightDefeat("Dragon contact");
+        }
+    }
+
     private Vector3 ResolveFlightLeadWorldPosition()
     {
         if (flightLead != null)
@@ -1378,7 +1584,7 @@ public class DragonBoss : MonoBehaviour
     {
         GetEffectivePathSize(out float width, out float depth, out _);
         float pathScale = Mathf.Max(width, depth, 1f);
-        return pathSpeed * pathScale * 2.5f;
+        return ActivePathSpeed * pathScale * 2.5f;
     }
 
     private float ResolveDeathGroundY(Vector3 fromPosition, float startY)
@@ -3516,6 +3722,7 @@ public class DragonBoss : MonoBehaviour
         tuning.maxHp = Mathf.Max(1, tuning.maxHp);
         tuning.roundSeconds = Mathf.Max(1f, tuning.roundSeconds);
         tuning.fireballInterval = Mathf.Max(1f, tuning.fireballInterval);
+        tuning.pathSpeed = Mathf.Max(0.01f, tuning.pathSpeed);
     }
 
     [ContextMenu("Setup Hit Colliders")]

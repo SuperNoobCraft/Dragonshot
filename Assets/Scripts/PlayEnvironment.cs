@@ -179,6 +179,37 @@ public class PlayEnvironment : MonoBehaviour
     }
 
     /// <summary>
+    /// Horizontal view forward for the player (CAVE front wall / glasses look).
+    /// Used so threats approach from the visible side.
+    /// </summary>
+    public static Vector3 ResolvePlayerViewForward()
+    {
+        Vector3 forward = Vector3.forward;
+
+        Transform tracking = ResolvePlayerTransform();
+        if (tracking != null)
+        {
+            forward = tracking.forward;
+        }
+        else
+        {
+            Camera mainCamera = Camera.main;
+            if (mainCamera != null)
+            {
+                forward = mainCamera.transform.forward;
+            }
+        }
+
+        forward = Vector3.ProjectOnPlane(forward, Vector3.up);
+        if (forward.sqrMagnitude < 1e-4f)
+        {
+            forward = Vector3.forward;
+        }
+
+        return forward.normalized;
+    }
+
+    /// <summary>
     /// Glasses / eye tracking part of the Votanic sensor.
     /// </summary>
     public static Transform ResolveVisionTransform()

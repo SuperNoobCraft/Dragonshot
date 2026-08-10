@@ -65,6 +65,8 @@ public class EnderCrystal : MonoBehaviour
     private Vector3 innerSpinBaseScale = Vector3.one;
     private Vector3 outerSpinBaseScale = Vector3.one;
     private float bobPhase;
+    private SphereCollider hitCollider;
+    private Vector3 hitColliderBaseCenter;
     private readonly List<Material> ownedMaterials = new List<Material>(8);
 
     public bool IsAlive => !destroyed && combatActive && growMode == GrowMode.None;
@@ -105,7 +107,17 @@ public class EnderCrystal : MonoBehaviour
         }
 
         bobPhase = Random.Range(0f, Mathf.PI * 2f);
+        CacheHitCollider();
         EnsureBeam();
+    }
+
+    private void CacheHitCollider()
+    {
+        hitCollider = GetComponent<SphereCollider>();
+        if (hitCollider != null)
+        {
+            hitColliderBaseCenter = hitCollider.center;
+        }
     }
 
     private void Start()
@@ -144,8 +156,7 @@ public class EnderCrystal : MonoBehaviour
             return;
         }
 
-        float bob = Mathf.Sin((Time.time * bobSpeed) + bobPhase) * bobAmplitude;
-        visualRoot.localPosition = visualBaseLocalPos + Vector3.up * bob;
+        ApplyBob();
 
         if (innerSpin != null)
         {
@@ -155,6 +166,28 @@ public class EnderCrystal : MonoBehaviour
         if (outerSpin != null)
         {
             outerSpin.Rotate(outerSpinAxis.normalized, outerSpinSpeed * Time.deltaTime, Space.Self);
+        }
+    }
+
+    private void ApplyBob()
+    {
+        float bob = Mathf.Sin((Time.time * bobSpeed) + bobPhase) * bobAmplitude;
+        Vector3 bobOffset = Vector3.up * bob;
+
+        if (visualRoot != null)
+        {
+            visualRoot.localPosition = visualBaseLocalPos + bobOffset;
+        }
+
+        // Keep the shootable sphere on the bobbing crystal, not the fixed root.
+        if (hitCollider == null)
+        {
+            CacheHitCollider();
+        }
+
+        if (hitCollider != null)
+        {
+            hitCollider.center = hitColliderBaseCenter + bobOffset;
         }
     }
 

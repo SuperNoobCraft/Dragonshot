@@ -220,6 +220,18 @@ public class FightAudio : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Same clip as the death cry, without stopping the flying loop (overtime roar).
+    /// </summary>
+    public static void PlayDragonRoar(Vector3 worldPosition)
+    {
+        FightAudio audio = Resolve();
+        if (audio != null)
+        {
+            audio.Play(audio.dragonDeath, worldPosition, audio.dragonDeathVolume);
+        }
+    }
+
     public static void PlayFireballShoot(Vector3 worldPosition)
     {
         FightAudio audio = Resolve();

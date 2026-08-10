@@ -43,6 +43,9 @@ public class DragonFightUI : MonoBehaviour
     [Tooltip("{0} = seconds left, {1} = current HP, {2} = max HP, {3} = difficulty")]
     [SerializeField] private string playingTimerText = "TIME {0}\nHP {1}/{2}\n{3}\n(click to reset)";
     [TextArea(2, 4)]
+    [Tooltip("Timer expired — dragon is chasing. {0}=HP, {1}=max HP, {2}=difficulty")]
+    [SerializeField] private string overtimeTimerText = "ENRAGED\nHP {0}/{1}\n{2}\n(click to reset)";
+    [TextArea(2, 4)]
     [Tooltip("Shown when the dragon dies and the player never equipped the scope. {0}=seconds, {1}=difficulty")]
     [SerializeField] private string victoryTextNoScope = "VICTORY\n{0}s left\nNo Scope\n{1}\nRESET";
     [TextArea(2, 4)]
@@ -51,9 +54,9 @@ public class DragonFightUI : MonoBehaviour
     [TextArea(2, 2)]
     [Tooltip("{0} = difficulty")]
     [SerializeField] private string timeoutText = "TIME UP\n{0}\nRESET";
-    [TextArea(2, 2)]
-    [Tooltip("{0} = difficulty")]
-    [SerializeField] private string defeatText = "DEFEAT\nHit by fireball\n{0}\nRESET";
+    [TextArea(2, 3)]
+    [Tooltip("{0} = cause (e.g. Hit by fireball), {1} = difficulty")]
+    [SerializeField] private string defeatText = "DEFEAT\n{0}\n{1}\nRESET";
 
     [Header("Interact")]
     [SerializeField] private bool instructionOnlyBeforeFight = true;
@@ -63,10 +66,22 @@ public class DragonFightUI : MonoBehaviour
     [SerializeField] private int maxAxesToScan = 16;
     [SerializeField] private int maxButtonsToScan = 16;
 
+    [Header("Defeat Tint")]
+    [Tooltip("Full-screen red wash while defeated (clears on reset). Drawn on every camera for CAVE.")]
+    [SerializeField] private Color defeatScreenTint = new Color(0.75f, 0.02f, 0.02f, 1f);
+    [Tooltip("Opacity on the frame of impact.")]
+    [SerializeField, Range(0.1f, 1f)] private float defeatTintStartAlpha = 0.8f;
+    [Tooltip("Opacity after the fade settles (still visible until reset).")]
+    [SerializeField, Range(0f, 1f)] private float defeatTintEndAlpha = 0.28f;
+    [SerializeField, Min(0.05f)] private float defeatTintFadeSeconds = 1.1f;
+
     private PanelState state = PanelState.Start;
     private bool wasTriggerHeld;
     private bool instructionOnly;
     private bool allowResetDuringEquip;
+    private bool defeatTintActive;
+    private float defeatTintStartTime;
+    private Material defeatTintMaterial;
 
     public void Assign(DragonBoss boss, TextMesh textMesh)
     {
@@ -94,6 +109,17 @@ public class DragonFightUI : MonoBehaviour
 
         EnsureLabel();
         EnsureInteractable();
+        Camera.onPostRender += DrawDefeatTint;
+    }
+
+    private void OnDestroy()
+    {
+        Camera.onPostRender -= DrawDefeatTint;
+        if (defeatTintMaterial != null)
+        {
+            Destroy(defeatTintMaterial);
+            defeatTintMaterial = null;
+        }
     }
 
     private void Update()
@@ -139,6 +165,7 @@ public class DragonFightUI : MonoBehaviour
 
     public void ShowStart()
     {
+        SetDefeatTint(false);
         instructionOnly = false;
         allowResetDuringEquip = false;
         state = PanelState.Start;
@@ -147,6 +174,7 @@ public class DragonFightUI : MonoBehaviour
 
     public void ShowEquipInstructions(string text)
     {
+        SetDefeatTint(false);
         instructionOnly = instructionOnlyBeforeFight;
         allowResetDuringEquip = false;
         state = PanelState.Start;
@@ -155,6 +183,7 @@ public class DragonFightUI : MonoBehaviour
 
     public void ShowEquipStep(int step)
     {
+        SetDefeatTint(false);
         instructionOnly = instructionOnlyBeforeFight;
         // After the bow is equipped, clicking the panel resets so you can re-pick a quiver.
         allowResetDuringEquip = step >= 2;
@@ -176,6 +205,7 @@ public class DragonFightUI : MonoBehaviour
 
     public void ShowTimer(float secondsRemaining, int hp, int maxHp)
     {
+        SetDefeatTint(false);
         instructionOnly = false;
         allowResetDuringEquip = false;
         state = PanelState.Playing;
@@ -188,8 +218,18 @@ public class DragonFightUI : MonoBehaviour
         ShowTimer(secondsRemaining, 0, 0);
     }
 
+    public void ShowOvertime(int hp, int maxHp)
+    {
+        SetDefeatTint(false);
+        instructionOnly = false;
+        allowResetDuringEquip = false;
+        state = PanelState.Playing;
+        SetText(FormatTemplate(overtimeTimerText, hp, maxHp, DifficultyLabel()));
+    }
+
     public void ShowVictory(float secondsLeft, bool usedScope = false)
     {
+        SetDefeatTint(false);
         allowResetDuringEquip = false;
         state = PanelState.Victory;
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsLeft));
@@ -199,16 +239,99 @@ public class DragonFightUI : MonoBehaviour
 
     public void ShowTimeout()
     {
+        SetDefeatTint(false);
         allowResetDuringEquip = false;
         state = PanelState.Timeout;
         SetText(FormatTemplate(timeoutText, DifficultyLabel()));
     }
 
-    public void ShowDefeat()
+    public void ShowDefeat(string cause = "Hit by fireball")
     {
         allowResetDuringEquip = false;
         state = PanelState.Defeat;
-        SetText(FormatTemplate(defeatText, DifficultyLabel()));
+        if (string.IsNullOrEmpty(cause))
+        {
+            cause = "Hit by fireball";
+        }
+
+        SetText(FormatTemplate(defeatText, cause, DifficultyLabel()));
+        SetDefeatTint(true);
+    }
+
+    private void SetDefeatTint(bool active)
+    {
+        defeatTintActive = active;
+        if (active)
+        {
+            defeatTintStartTime = Time.unscaledTime;
+        }
+    }
+
+    private Color CurrentDefeatTintColor()
+    {
+        Color c = defeatScreenTint;
+        if (!defeatTintActive)
+        {
+            c.a = 0f;
+            return c;
+        }
+
+        float duration = Mathf.Max(0.05f, defeatTintFadeSeconds);
+        float t = Mathf.Clamp01((Time.unscaledTime - defeatTintStartTime) / duration);
+        // Ease out so the hit flash reads strongly, then settles.
+        t = 1f - (1f - t) * (1f - t);
+        c.a = Mathf.Lerp(defeatTintStartAlpha, defeatTintEndAlpha, t);
+        return c;
+    }
+
+    private void DrawDefeatTint(Camera cam)
+    {
+        if (!defeatTintActive || cam == null || !cam.isActiveAndEnabled)
+        {
+            return;
+        }
+
+        // Skip overlay/preview cameras that shouldn't get the wash.
+        if (cam.cameraType != CameraType.Game && cam.cameraType != CameraType.VR)
+        {
+            return;
+        }
+
+        if (defeatTintMaterial == null)
+        {
+            Shader shader = Shader.Find("Hidden/Internal-Colored");
+            if (shader == null)
+            {
+                shader = Shader.Find("UI/Default");
+            }
+
+            if (shader == null)
+            {
+                return;
+            }
+
+            defeatTintMaterial = new Material(shader);
+            defeatTintMaterial.hideFlags = HideFlags.HideAndDontSave;
+            defeatTintMaterial.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            defeatTintMaterial.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            defeatTintMaterial.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+            defeatTintMaterial.SetInt("_ZWrite", 0);
+        }
+
+        Color tint = CurrentDefeatTintColor();
+        defeatTintMaterial.color = tint;
+        defeatTintMaterial.SetPass(0);
+
+        GL.PushMatrix();
+        GL.LoadOrtho();
+        GL.Begin(GL.QUADS);
+        GL.Color(tint);
+        GL.Vertex3(0f, 0f, 0f);
+        GL.Vertex3(1f, 0f, 0f);
+        GL.Vertex3(1f, 1f, 0f);
+        GL.Vertex3(0f, 1f, 0f);
+        GL.End();
+        GL.PopMatrix();
     }
 
     private string DifficultyLabel()
