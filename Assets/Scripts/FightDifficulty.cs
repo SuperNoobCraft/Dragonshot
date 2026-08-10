@@ -23,4 +23,6 @@ public struct DifficultyFightTuning
     [Min(1f)] public float fireballInterval;
     [Tooltip("Figure-8 path speed while fighting.")]
     [Min(0.01f)] public float pathSpeed;
+    [Tooltip("Fireball travel speed.")]
+    [Min(0.1f)] public float fireballSpeed;
 }

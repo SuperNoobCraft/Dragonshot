@@ -1,0 +1,11 @@
+Model Information:
+* title:	Minecraft End City
+* source:	https://sketchfab.com/3d-models/minecraft-end-city-ed52ff1f807f4b62a55037551ea51544
+* author:	Bully Magraptor (https://sketchfab.com/irex6510)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Minecraft End City" (https://sketchfab.com/3d-models/minecraft-end-city-ed52ff1f807f4b62a55037551ea51544) by Bully Magraptor (https://sketchfab.com/irex6510) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

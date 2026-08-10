@@ -58,7 +58,8 @@ public class DragonBoss : MonoBehaviour
         maxHp = 3,
         roundSeconds = 120f,
         fireballInterval = 8f,
-        pathSpeed = 0.35f
+        pathSpeed = 0.35f,
+        fireballSpeed = 1.6f
     };
     [Tooltip("HP, time limit, fireball pacing, and path speed for Normal.")]
     [SerializeField] private DifficultyFightTuning normalTuning = new DifficultyFightTuning
@@ -66,7 +67,8 @@ public class DragonBoss : MonoBehaviour
         maxHp = 5,
         roundSeconds = 90f,
         fireballInterval = 5.5f,
-        pathSpeed = 0.35f
+        pathSpeed = 0.35f,
+        fireballSpeed = 3.2f
     };
     [Tooltip("HP, time limit, fireball pacing, and path speed for Hard.")]
     [SerializeField] private DifficultyFightTuning hardTuning = new DifficultyFightTuning
@@ -74,7 +76,8 @@ public class DragonBoss : MonoBehaviour
         maxHp = 7,
         roundSeconds = 75f,
         fireballInterval = 3.5f,
-        pathSpeed = 0.5f
+        pathSpeed = 0.5f,
+        fireballSpeed = 3.2f
     };
     [Tooltip("How many crystal towers rise on Easy (of the ones in the scene).")]
     [SerializeField, Min(1)] private int easyActivePillarCount = 2;
@@ -105,23 +108,33 @@ public class DragonBoss : MonoBehaviour
     [SerializeField, Min(1)] private int crystalExplosionDamage = 1;
 
     [Header("Death")]
-    [Tooltip("Gravity scale while diving after death (1 = Physics.gravity).")]
-    [SerializeField] private float deathGravityMultiplier = 1.5f;
-    [Tooltip("How quickly the nose aligns with dive velocity (higher = snappier).")]
-    [SerializeField] private float deathDiveAlignSpeed = 3.5f;
-    [SerializeField] private float deathMaxFallSeconds = 8f;
-    [SerializeField] private LayerMask deathGroundMask = ~0;
-    [SerializeField] private float deathGroundProbeHeight = 120f;
-    [Tooltip("Stop when the head is this far above the hit ground.")]
-    [SerializeField] private float deathImpactClearance = 0.2f;
-    [Tooltip("Fallback fall distance if no floor collider is found. Flight Bounds are NOT used — "
-             + "death can fall below the flight box to the real ground.")]
-    [SerializeField] private float fallDropDistance = 12f;
-    [Tooltip("Optional floor marker. If set, death crashes at this height instead of raycasting.")]
-    [SerializeField] private Transform deathGroundAnchor;
-    [SerializeField] private float deathImpactArmSeconds = 0.25f;
-    [SerializeField] private float deathMaxSpeed = 22f;
-    [SerializeField] private float fadeOutDuration = 0.65f;
+    [Tooltip("Seconds of slow continued flight with light rays before the final explosion.")]
+    [SerializeField, Min(0.35f)] private float deathFlySeconds = 2.4f;
+    [Tooltip("Path/coast speed multiplier while dying (1 = normal fight speed).")]
+    [SerializeField, Range(0.05f, 1f)] private float deathFlySpeedMultiplier = 0.32f;
+    [Tooltip("Wing flap rate while dying.")]
+    [SerializeField, Range(0.05f, 1.5f)] private float deathAnimSpeed = 0.4f;
+    [Tooltip("How quickly the body shrinks into the final explosion.")]
+    [SerializeField, Min(0.05f)] private float deathExplodeHideSeconds = 0.35f;
+    [SerializeField, Min(4)] private int deathRayCount = 14;
+    [SerializeField, Min(0.5f)] private float deathRayLength = 7f;
+    [SerializeField, Min(0.02f)] private float deathRayThickness = 0.1f;
+    [SerializeField] private float deathRaySpinDegreesPerSecond = 55f;
+    [SerializeField] private Color deathRayColor = new Color(1f, 0.85f, 1f, 1f);
+    [SerializeField] private float deathRayLightIntensity = 5.5f;
+    [SerializeField] private float deathRayLightRange = 9f;
+    // Legacy fall fields (kept for scene serialization; unused by the new death fly-out).
+    [SerializeField, HideInInspector] private float deathGravityMultiplier = 1.5f;
+    [SerializeField, HideInInspector] private float deathDiveAlignSpeed = 3.5f;
+    [SerializeField, HideInInspector] private float deathMaxFallSeconds = 8f;
+    [SerializeField, HideInInspector] private LayerMask deathGroundMask = ~0;
+    [SerializeField, HideInInspector] private float deathGroundProbeHeight = 120f;
+    [SerializeField, HideInInspector] private float deathImpactClearance = 0.2f;
+    [SerializeField, HideInInspector] private float fallDropDistance = 12f;
+    [SerializeField, HideInInspector] private Transform deathGroundAnchor;
+    [SerializeField, HideInInspector] private float deathImpactArmSeconds = 0.25f;
+    [SerializeField, HideInInspector] private float deathMaxSpeed = 22f;
+    [SerializeField, HideInInspector] private float fadeOutDuration = 0.65f;
 
     [Header("Hit Collider")]
     [Tooltip("Mesh colliders on the visual mesh children (recommended). Box is a simple fallback.")]
@@ -290,6 +303,7 @@ public class DragonBoss : MonoBehaviour
     private float ActiveRoundSeconds => GetTuning(difficulty).roundSeconds;
     private float ActiveFireballInterval => Mathf.Max(1f, GetTuning(difficulty).fireballInterval);
     private float ActivePathSpeed => Mathf.Max(0.01f, GetTuning(difficulty).pathSpeed);
+    private float ActiveFireballSpeed => Mathf.Max(0.1f, GetTuning(difficulty).fireballSpeed);
 
     private DifficultyFightTuning GetTuning(FightDifficulty value)
     {
@@ -345,6 +359,21 @@ public class DragonBoss : MonoBehaviour
         if (hardTuning.pathSpeed < 0.01f)
         {
             hardTuning.pathSpeed = 0.5f;
+        }
+
+        if (easyTuning.fireballSpeed < 0.1f)
+        {
+            easyTuning.fireballSpeed = 1.6f;
+        }
+
+        if (normalTuning.fireballSpeed < 0.1f)
+        {
+            normalTuning.fireballSpeed = 3.2f;
+        }
+
+        if (hardTuning.fireballSpeed < 0.1f)
+        {
+            hardTuning.fireballSpeed = 3.2f;
         }
     }
 
@@ -941,6 +970,14 @@ public class DragonBoss : MonoBehaviour
         return Mathf.Abs(local.x) <= allowedHalfX + 0.001f;
     }
 
+    private DragonFireballSettings ResolveActiveFireballSettings()
+    {
+        EnsureFireballSettings();
+        DragonFireballSettings settings = fireballSettings;
+        settings.speed = ActiveFireballSpeed;
+        return settings;
+    }
+
     private void EnsureFireballSettings()
     {
         if (fireballSettings.size >= 0.15f && fireballSettings.speed >= 0.5f)
@@ -953,7 +990,7 @@ public class DragonBoss : MonoBehaviour
 
     private void TrySpawnFireball()
     {
-        EnsureFireballSettings();
+        DragonFireballSettings spawnSettings = ResolveActiveFireballSettings();
         Vector3 spawnPos = ResolveFireballSpawnPosition();
         Vector3 target = PlayEnvironment.ResolvePlayerAimPosition();
         Vector3 dir = target - spawnPos;
@@ -968,7 +1005,7 @@ public class DragonBoss : MonoBehaviour
             spawnPos,
             dir,
             this,
-            fireballSettings);
+            spawnSettings);
 
         FightAudio.PlayFireballShoot(spawnPos);
 
@@ -1223,101 +1260,98 @@ public class DragonBoss : MonoBehaviour
         shieldUp = false;
         phase = FightPhase.Ended;
         SetShieldVisible(false);
-        SetAnimatorRunning(false);
         SetDragonCollidersEnabled(false);
         ClearFireballs();
-        FightAudio.SetDragonFlying(false);
+        SetAnimatorRunning(true, deathAnimSpeed);
         FightAudio.PlayDragonDeath(transform.position);
-        OpaqueBurstVfx.SpawnDragonDeath(transform, CrystalEnergyColor);
+        // Death cry stops the fly loop — restore soft fly ambience for the coast phase.
+        FightAudio.SetDragonFlying(true);
 
         if (deathRoutine != null)
         {
             StopCoroutine(deathRoutine);
         }
 
-        deathRoutine = StartCoroutine(DeathFallAndFadeRoutine());
+        deathRoutine = StartCoroutine(DeathFlyAndExplodeRoutine());
     }
 
-    private IEnumerator DeathFallAndFadeRoutine()
+    private IEnumerator DeathFlyAndExplodeRoutine()
     {
-        Vector3 velocity = flightVelocity;
-        if (velocity.sqrMagnitude < 0.25f)
+        if (bodyMaterialSlots.Count == 0)
         {
-            velocity = GetBodyForwardWorld() * Mathf.Max(3f, EstimateFlightSpeed());
+            CacheBodyVisualMaterials();
         }
 
-        float maxSpeed = Mathf.Max(4f, deathMaxSpeed);
-        if (velocity.sqrMagnitude > maxSpeed * maxSpeed)
+        Vector3 coastHeading = GetBodyForwardWorld();
+        if (coastHeading.sqrMagnitude < 1e-6f)
         {
-            velocity = velocity.normalized * maxSpeed;
+            coastHeading = transform.forward;
         }
 
-        float startNoseY = ResolveFlightLeadWorldPosition().y;
-        float startY = Mathf.Min(startNoseY, transform.position.y);
-        float groundY = ResolveDeathGroundY(transform.position, startY);
+        coastHeading.Normalize();
 
-        float fallElapsed = 0f;
-        bool crashed = false;
+        float coastSpeed = Mathf.Max(0.75f, EstimateFlightSpeed() * deathFlySpeedMultiplier);
+        GameObject rayRoot = BuildDeathRayBurst(out Light deathLight, out List<DeathRay> rays);
+        float flyDuration = Mathf.Max(0.35f, deathFlySeconds);
+        float elapsed = 0f;
 
-        while (fallElapsed < deathMaxFallSeconds && !crashed)
+        while (elapsed < flyDuration)
         {
             float dt = Time.deltaTime;
-            fallElapsed += dt;
+            elapsed += dt;
+            float u = Mathf.Clamp01(elapsed / flyDuration);
 
-            velocity += Physics.gravity * deathGravityMultiplier * dt;
-            if (velocity.sqrMagnitude > maxSpeed * maxSpeed)
+            // Keep coasting along the last flight heading (slower than fight speed).
+            Quaternion face = RotationFromBodyAxis(coastHeading);
+            Vector3 lead = ResolveFlightLeadWorldPosition();
+            Vector3 newLead = lead + coastHeading * coastSpeed * dt;
+            transform.SetPositionAndRotation(newLead - face * flightLeadLocal, face);
+
+            UpdateDeathRays(rayRoot, rays, deathLight, elapsed, u);
+            UpdateDeathBodyGlow(u);
+
+            if (hasRootFlightSample && dt > 1e-5f)
             {
-                velocity = velocity.normalized * maxSpeed;
+                flightVelocity = (transform.position - lastRootPosition) / dt;
             }
 
-            transform.position += velocity * dt;
-
-            // Tip nose along velocity without quaternion flips that can bury the mesh.
-            Vector3 diveAxis = velocity.sqrMagnitude > 0.01f ? velocity.normalized : Vector3.down;
-            Vector3 currentAxis = GetBodyForwardWorld();
-            float align = 1f - Mathf.Exp(-deathDiveAlignSpeed * dt);
-            Vector3 tippedAxis = Vector3.Slerp(currentAxis, diveAxis, align).normalized;
-            if (tippedAxis.sqrMagnitude > 1e-6f)
-            {
-                transform.rotation = RotationFromBodyAxisForDive(tippedAxis);
-            }
-
-            float noseY = ResolveFlightLeadWorldPosition().y;
-            bool armed = fallElapsed >= deathImpactArmSeconds
-                         && velocity.y <= 0f
-                         && noseY < startY - 0.75f;
-            if (armed && noseY <= groundY + deathImpactClearance)
-            {
-                transform.position += Vector3.up * (groundY + deathImpactClearance - noseY);
-                crashed = true;
-            }
-
+            lastRootPosition = transform.position;
+            hasRootFlightSample = true;
             yield return null;
         }
 
-        // Impact pop when the head hits the ground.
-        OpaqueBurstVfx.Settings impact = OpaqueBurstVfx.Settings.DragonDeathDefault;
-        impact.startSize = 0.6f;
-        impact.radius = 2.8f;
-        impact.duration = 0.7f;
-        impact.sparkCount = 32;
-        impact.shardCount = 12;
-        impact.coreColor = CrystalEnergyColor;
-        impact.sparkColor = Color.Lerp(CrystalEnergyColor, Color.white, 0.3f);
-        OpaqueBurstVfx.Spawn(ResolveFlightLeadWorldPosition(), impact);
+        // Final explosion — body collapses into the blast.
+        Vector3 blastPos = ResolveDeathBlastPosition();
+        OpaqueBurstVfx.Settings blast = OpaqueBurstVfx.Settings.DragonDeathDefault;
+        Color energy = CrystalEnergyColor;
+        energy.a = 1f;
+        blast.coreColor = Color.Lerp(energy, Color.white, 0.4f);
+        blast.sparkColor = energy;
+        blast.shardColor = Color.Lerp(energy, Color.black, 0.25f);
+        blast.duration = Mathf.Max(0.8f, blast.duration);
+        blast.radius = Mathf.Max(blast.radius, deathRayLength * 0.65f);
+        OpaqueBurstVfx.Spawn(blastPos, blast);
 
-        float fadeElapsed = 0f;
-        while (fadeElapsed < fadeOutDuration)
+        if (rayRoot != null)
         {
-            fadeElapsed += Time.deltaTime;
-            float t = Mathf.Clamp01(fadeElapsed / fadeOutDuration);
-            float scale = 1f - t;
+            Destroy(rayRoot);
+        }
+
+        FightAudio.SetDragonFlying(false);
+
+        float hideDuration = Mathf.Max(0.05f, deathExplodeHideSeconds);
+        float hideElapsed = 0f;
+        while (hideElapsed < hideDuration)
+        {
+            hideElapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(hideElapsed / hideDuration);
+            // Ease-in shrink so it reads as swallowed by the explosion core.
+            float scale = 1f - (t * t);
             if (visualScaleRoot != null)
             {
-                visualScaleRoot.localScale = visualScaleRootBaseScale * scale;
+                visualScaleRoot.localScale = visualScaleRootBaseScale * Mathf.Max(0f, scale);
             }
 
-            SetBodyVisualAlpha(1f - t);
             yield return null;
         }
 
@@ -1352,6 +1386,191 @@ public class DragonBoss : MonoBehaviour
         }
     }
 
+    private Vector3 ResolveDeathBlastPosition()
+    {
+        if (TryGetVisualBounds(out Bounds bounds, includeWhenDisabled: true))
+        {
+            return bounds.center;
+        }
+
+        return ShieldAttachPoint;
+    }
+
+    private struct DeathRay
+    {
+        public Transform Transform;
+        public Vector3 LocalDir;
+        public Color BaseColor;
+    }
+
+    private GameObject BuildDeathRayBurst(out Light deathLight, out List<DeathRay> rays)
+    {
+        rays = new List<DeathRay>(Mathf.Max(4, deathRayCount));
+        GameObject root = new GameObject("DeathLightRays");
+        // World-locked origin at body center — rays are children so they share one point.
+        root.transform.SetParent(null, true);
+        root.transform.position = ResolveDeathBlastPosition();
+        root.transform.rotation = Quaternion.identity;
+
+        GameObject lightGo = new GameObject("DeathRayLight");
+        lightGo.transform.SetParent(root.transform, false);
+        lightGo.transform.localPosition = Vector3.zero;
+        deathLight = lightGo.AddComponent<Light>();
+        deathLight.type = LightType.Point;
+        deathLight.color = Color.Lerp(CrystalEnergyColor, Color.white, 0.35f);
+        deathLight.intensity = deathRayLightIntensity;
+        deathLight.range = deathRayLightRange;
+        deathLight.shadows = LightShadows.None;
+
+        int count = Mathf.Max(4, deathRayCount);
+        float thickness = Mathf.Max(0.02f, deathRayThickness);
+
+        for (int i = 0; i < count; i++)
+        {
+            // Fibonacci sphere directions for even coverage.
+            float t = (i + 0.5f) / count;
+            float inclination = Mathf.Acos(1f - 2f * t);
+            float azimuth = i * 2.399963f;
+            Vector3 dir = new Vector3(
+                Mathf.Sin(inclination) * Mathf.Cos(azimuth),
+                Mathf.Cos(inclination),
+                Mathf.Sin(inclination) * Mathf.Sin(azimuth)).normalized;
+
+            GameObject ray = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            ray.name = "DeathRay_" + i;
+            ray.transform.SetParent(root.transform, false);
+            Destroy(ray.GetComponent<Collider>());
+
+            Color shade = DeathRayShade(i, count);
+            Renderer renderer = ray.GetComponent<Renderer>();
+            Material mat = DragonFireball.CreateOpaqueUnlit(shade, "DeathRayMat_" + i);
+            renderer.sharedMaterial = mat;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+
+            // Beam along local +Y; near face sits on the shared origin.
+            ray.transform.localRotation = Quaternion.FromToRotation(Vector3.up, dir);
+            ray.transform.localScale = new Vector3(thickness, 0.05f, thickness);
+            ray.transform.localPosition = dir * 0.025f;
+
+            rays.Add(new DeathRay
+            {
+                Transform = ray.transform,
+                LocalDir = dir,
+                BaseColor = shade
+            });
+        }
+
+        return root;
+    }
+
+    private Color DeathRayShade(int index, int count)
+    {
+        // Opaque pink → magenta range (stand-in for layered translucent beams).
+        float t = count <= 1 ? 0.5f : index / (float)(count - 1);
+        Color softPink = new Color(1f, 0.72f, 0.92f, 1f);
+        Color hotPink = new Color(1f, 0.35f, 0.75f, 1f);
+        Color magenta = new Color(0.85f, 0.1f, 0.95f, 1f);
+        Color deepMagenta = new Color(0.55f, 0.02f, 0.7f, 1f);
+        Color energy = CrystalEnergyColor;
+        energy.a = 1f;
+
+        Color shade;
+        if (t < 0.33f)
+        {
+            shade = Color.Lerp(softPink, hotPink, t / 0.33f);
+        }
+        else if (t < 0.66f)
+        {
+            shade = Color.Lerp(hotPink, magenta, (t - 0.33f) / 0.33f);
+        }
+        else
+        {
+            shade = Color.Lerp(magenta, deepMagenta, (t - 0.66f) / 0.34f);
+        }
+
+        // Bias slightly toward the fight crystal energy so it matches the encounter.
+        shade = Color.Lerp(shade, energy, 0.2f);
+        shade.a = 1f;
+        return shade;
+    }
+
+    private void UpdateDeathRays(
+        GameObject rayRoot,
+        List<DeathRay> rays,
+        Light deathLight,
+        float elapsed,
+        float normalized01)
+    {
+        if (rayRoot != null)
+        {
+            // Keep every beam rooted on the same body-center point.
+            rayRoot.transform.position = ResolveDeathBlastPosition();
+            rayRoot.transform.Rotate(Vector3.up, deathRaySpinDegreesPerSecond * Time.deltaTime, Space.World);
+        }
+
+        float length = Mathf.Max(0.5f, deathRayLength);
+        float thickness = Mathf.Max(0.02f, deathRayThickness);
+        float pulse = 0.55f + 0.45f * Mathf.Sin(elapsed * 14f);
+        float grow = Mathf.Lerp(0.2f, 1f, Mathf.SmoothStep(0f, 1f, normalized01));
+        float currentLength = length * grow * (0.8f + 0.2f * pulse);
+
+        for (int i = 0; i < rays.Count; i++)
+        {
+            DeathRay ray = rays[i];
+            if (ray.Transform == null)
+            {
+                continue;
+            }
+
+            Vector3 dir = ray.LocalDir;
+            float wobble = 0.88f + 0.12f * Mathf.Sin(elapsed * 11f + i * 0.7f);
+            float len = currentLength * wobble;
+            float thick = thickness * (0.75f + 0.4f * pulse);
+
+            // Center of the cube sits at half-length along dir → inner tip at origin.
+            ray.Transform.localScale = new Vector3(thick, len, thick);
+            ray.Transform.localPosition = dir * (len * 0.5f);
+
+            Renderer renderer = ray.Transform.GetComponent<Renderer>();
+            if (renderer != null && renderer.sharedMaterial != null)
+            {
+                Color c = Color.Lerp(ray.BaseColor, Color.white, 0.15f * pulse);
+                c.a = 1f;
+                DragonFireball.ApplyColor(renderer.sharedMaterial, c);
+            }
+        }
+
+        if (deathLight != null)
+        {
+            Color lightColor = Color.Lerp(CrystalEnergyColor, deathRayColor, 0.5f + 0.5f * pulse);
+            lightColor.a = 1f;
+            deathLight.intensity = deathRayLightIntensity * (0.65f + 0.7f * pulse) * (0.4f + 0.6f * grow);
+            deathLight.range = deathRayLightRange * (0.7f + 0.5f * grow);
+            deathLight.color = lightColor;
+        }
+    }
+
+    private void UpdateDeathBodyGlow(float normalized01)
+    {
+        float pulse = 0.5f + 0.5f * Mathf.Sin(Time.time * 12f);
+        float glow = Mathf.Lerp(0.15f, 0.85f, normalized01) * pulse;
+        Color glowColor = Color.Lerp(CrystalEnergyColor, Color.white, 0.55f);
+
+        for (int i = 0; i < bodyMaterialSlots.Count; i++)
+        {
+            BodyMaterialSlot slot = bodyMaterialSlots[i];
+            if (slot.Material == null)
+            {
+                continue;
+            }
+
+            Color c = Color.Lerp(slot.BaseColor, glowColor, glow);
+            c.a = 1f;
+            ApplyMaterialColor(slot.Material, c, slot.UsesBaseColorProp);
+        }
+    }
+
     private void Die()
     {
         BeginDeathSequence();
@@ -1380,7 +1599,7 @@ public class DragonBoss : MonoBehaviour
     {
         if (isDying)
         {
-            FightAudio.SetDragonFlying(false);
+            // Death routine owns motion + audio while rays are active.
             return;
         }
 
@@ -3723,6 +3942,7 @@ public class DragonBoss : MonoBehaviour
         tuning.roundSeconds = Mathf.Max(1f, tuning.roundSeconds);
         tuning.fireballInterval = Mathf.Max(1f, tuning.fireballInterval);
         tuning.pathSpeed = Mathf.Max(0.01f, tuning.pathSpeed);
+        tuning.fireballSpeed = Mathf.Max(0.1f, tuning.fireballSpeed);
     }
 
     [ContextMenu("Setup Hit Colliders")]
