@@ -20,6 +20,10 @@ public class FightAudio : MonoBehaviour
     [SerializeField] private AudioClip crystalExplode;
     [Tooltip("Single-flap clips. One plays at random on each flap beat.")]
     [SerializeField] private AudioClip[] dragonFlaps;
+    [Tooltip("Equip variants (bow / quiver / wear / later arrow draws). One picked at random each play.")]
+    [SerializeField] private AudioClip[] equipSounds;
+    [Tooltip("Plays once when a draw starts; stopped immediately on release/shot. One picked at random.")]
+    [SerializeField] private AudioClip[] bowDrawSounds;
 
     [Header("Wing Flaps")]
     [Tooltip("Seconds between flap one-shots while the dragon is flying. Match your wing anim.")]
@@ -37,6 +41,8 @@ public class FightAudio : MonoBehaviour
     [SerializeField, Range(0f, 1f)] private float fireballExplodeVolume = 1f;
     [SerializeField, Range(0f, 1f)] private float crystalExplodeVolume = 1f;
     [SerializeField, Range(0f, 1f)] private float dragonFlapVolume = 0.7f;
+    [SerializeField, Range(0f, 2f)] private float equipVolume = 1.25f;
+    [SerializeField, Range(0f, 1f)] private float bowDrawVolume = 0.85f;
 
     [Header("Manual Distance (no Unity spatial audio)")]
     [Tooltip("If on, volume is scaled by distance from the player using the curve below.")]
@@ -51,6 +57,8 @@ public class FightAudio : MonoBehaviour
     [Header("Source")]
     [Tooltip("Single non-spatial AudioSource used for everything. Auto-created if empty.")]
     [SerializeField] private AudioSource sfxSource;
+    [Tooltip("Dedicated source so bow draw can be stopped without killing other one-shots.")]
+    [SerializeField] private AudioSource bowDrawSource;
 
     private bool flyingActive;
     private float nextFlapTime;
@@ -114,13 +122,65 @@ public class FightAudio : MonoBehaviour
             sfxSource = sfxGo.AddComponent<AudioSource>();
         }
 
+        ConfigureNonSpatial(sfxSource);
+        EnsureBowDrawSource();
+    }
+
+    private void EnsureBowDrawSource()
+    {
+        if (bowDrawSource == null)
+        {
+            GameObject drawGo = new GameObject("FightAudio_BowDraw");
+            drawGo.transform.SetParent(transform, false);
+            bowDrawSource = drawGo.AddComponent<AudioSource>();
+        }
+
+        ConfigureNonSpatial(bowDrawSource);
+    }
+
+    private static void ConfigureNonSpatial(AudioSource source)
+    {
         // Force non-spatial — CAVE does not handle Unity 3D audio reliably.
-        sfxSource.playOnAwake = false;
-        sfxSource.loop = false;
-        sfxSource.spatialBlend = 0f;
-        sfxSource.spatialize = false;
-        sfxSource.bypassListenerEffects = false;
-        sfxSource.volume = 1f;
+        source.playOnAwake = false;
+        source.loop = false;
+        source.spatialBlend = 0f;
+        source.spatialize = false;
+        source.bypassListenerEffects = false;
+        source.volume = 1f;
+    }
+
+    private void PlayBowDrawInternal(Vector3 worldPosition)
+    {
+        AudioClip clip = PickRandom(bowDrawSounds);
+        if (clip == null || masterVolume <= 0.001f || bowDrawVolume <= 0.001f)
+        {
+            return;
+        }
+
+        EnsureBowDrawSource();
+        StopBowDrawInternal();
+
+        float distMul = useManualDistanceVolume
+            ? DistanceVolumeMultiplier(worldPosition)
+            : 1f;
+        float vol = Mathf.Clamp01(bowDrawVolume * masterVolume * distMul);
+        if (vol <= 0.001f)
+        {
+            return;
+        }
+
+        bowDrawSource.clip = clip;
+        bowDrawSource.volume = vol;
+        bowDrawSource.loop = false;
+        bowDrawSource.Play();
+    }
+
+    private void StopBowDrawInternal()
+    {
+        if (bowDrawSource != null && bowDrawSource.isPlaying)
+        {
+            bowDrawSource.Stop();
+        }
     }
 
     public static void PlayArrowShot(Vector3 worldPosition)
@@ -187,6 +247,60 @@ public class FightAudio : MonoBehaviour
         }
     }
 
+    public static void PlayEquipBow(Vector3 worldPosition)
+    {
+        PlayEquip(worldPosition);
+    }
+
+    public static void PlayEquipQuiverPickup(Vector3 worldPosition)
+    {
+        PlayEquip(worldPosition);
+    }
+
+    public static void PlayEquipQuiverWear(Vector3 worldPosition)
+    {
+        PlayEquip(worldPosition);
+    }
+
+    public static void PlayEquipScope(Vector3 worldPosition)
+    {
+        PlayEquip(worldPosition);
+    }
+
+    /// <summary>Back-quiver arrow grab.</summary>
+    public static void PlayEquipArrowFromQuiver(Vector3 worldPosition)
+    {
+        PlayEquip(worldPosition);
+    }
+
+    public static void PlayEquip(Vector3 worldPosition)
+    {
+        FightAudio audio = Resolve();
+        if (audio != null)
+        {
+            audio.Play(PickRandom(audio.equipSounds), worldPosition, audio.equipVolume);
+        }
+    }
+
+    /// <summary>Start draw creak once per load. Call StopBowDraw on shot/cancel.</summary>
+    public static void PlayBowDraw(Vector3 worldPosition)
+    {
+        FightAudio audio = Resolve();
+        if (audio != null)
+        {
+            audio.PlayBowDrawInternal(worldPosition);
+        }
+    }
+
+    public static void StopBowDraw()
+    {
+        FightAudio audio = Resolve();
+        if (audio != null)
+        {
+            audio.StopBowDrawInternal();
+        }
+    }
+
     public static void SetDragonFlying(bool flying)
     {
         FightAudio audio = Resolve();
@@ -237,7 +351,7 @@ public class FightAudio : MonoBehaviour
         float distMul = useManualDistanceVolume
             ? DistanceVolumeMultiplier(worldPosition)
             : 1f;
-        float vol = Mathf.Clamp01(volume * masterVolume * distMul);
+        float vol = Mathf.Max(0f, volume * masterVolume * distMul);
         if (vol <= 0.001f)
         {
             return;

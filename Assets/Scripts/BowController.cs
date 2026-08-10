@@ -113,6 +113,22 @@ public class BowController : MonoBehaviour
     [Tooltip("Desktop fallback while testing back quiver (simulates a reach pickup).")]
     [SerializeField] private KeyCode desktopBackQuiverKey = KeyCode.B;
 
+    [Header("Scope Trajectory")]
+    [Tooltip("If true, the green dotted aim arc only shows after picking up a ScopePickup.")]
+    [SerializeField] private bool trajectoryRequiresScope = true;
+    [SerializeField] private bool scopeEquipped = false;
+    [SerializeField] private Color trajectoryColor = new Color(0.2f, 1f, 0.35f, 0.95f);
+    [Tooltip("Trajectory color when the arc would hit a crystal, fireball, or unshielded dragon.")]
+    [SerializeField] private Color trajectoryTargetColor = new Color(1f, 0.2f, 0.15f, 0.95f);
+    [SerializeField, Min(4)] private int trajectoryPoints = 48;
+    [SerializeField, Min(0.01f)] private float trajectoryTimeStep = 0.05f;
+    [SerializeField, Min(0.5f)] private float trajectoryMaxSeconds = 3.5f;
+    [SerializeField] private float trajectoryWidth = 0.025f;
+    [SerializeField] private float trajectoryDashWorldSize = 0.18f;
+    [SerializeField] private LayerMask trajectoryHitMask = ~0;
+    [Tooltip("Desktop: toggle scope without a pickup (for testing).")]
+    [SerializeField] private KeyCode desktopToggleScopeKey = KeyCode.T;
+
     private enum State { Idle, Drawing }
 
     private State state;
@@ -131,6 +147,81 @@ public class BowController : MonoBehaviour
     private float backQuiverDwell;
     private bool quiverMountedOnBack;
     private bool bowGrounded;
+    private int backQuiverArrowPickups;
+    private LineRenderer trajectoryLine;
+    private Material trajectoryMaterial;
+    private readonly Vector3[] trajectoryBuffer = new Vector3[128];
+    private readonly RaycastHit[] trajectoryHits = new RaycastHit[24];
+    private DragonBoss cachedTrajectoryDragon;
+
+    public bool HasScopeEquipped => scopeEquipped;
+    public bool IsDrawing => state == State.Drawing;
+
+    public void SetScopeEquipped(bool equipped)
+    {
+        scopeEquipped = equipped;
+        if (!equipped)
+        {
+            HideTrajectory();
+        }
+
+        if (logInputDetection)
+        {
+            Debug.Log(equipped ? "BowController: scope equipped — trajectory preview on."
+                               : "BowController: scope removed.", this);
+        }
+    }
+
+    [ContextMenu("Create Scope Pickup (Trajectory Preview)")]
+    public void CreateScopePickup()
+    {
+        ScopePickup existing = FindObjectOfType<ScopePickup>();
+        if (existing != null)
+        {
+#if UNITY_EDITOR
+            UnityEditor.Selection.activeGameObject = existing.gameObject;
+#endif
+            Debug.Log("ScopePickup already exists — selected it.", existing);
+            return;
+        }
+
+        GameObject root = new GameObject("ScopePickup");
+        root.transform.position = transform.position + transform.right * -0.85f + Vector3.up * 1.1f;
+
+        GameObject visual = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        visual.name = "ScopeGroundVisual";
+        visual.transform.SetParent(root.transform, false);
+        visual.transform.localScale = new Vector3(0.12f, 0.22f, 0.12f);
+        Collider col = visual.GetComponent<Collider>();
+        if (col != null)
+        {
+            if (Application.isPlaying)
+            {
+                Destroy(col);
+            }
+            else
+            {
+                DestroyImmediate(col);
+            }
+        }
+
+        Renderer renderer = visual.GetComponent<Renderer>();
+        if (renderer != null)
+        {
+            Material mat = new Material(Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default"));
+            mat.color = new Color(0.15f, 0.9f, 0.3f, 1f);
+            renderer.sharedMaterial = mat;
+        }
+
+        ScopePickup pickup = root.AddComponent<ScopePickup>();
+        pickup.Assign(this, visual);
+
+#if UNITY_EDITOR
+        UnityEditor.Selection.activeGameObject = root;
+        UnityEditor.EditorUtility.SetDirty(root);
+#endif
+        Debug.Log("Created ScopePickup. Pick it up (desktop: G) to enable green trajectory while aiming.", root);
+    }
 
     /// <summary>
     /// Places an editable world-space toggle panel near the bow.
@@ -283,10 +374,12 @@ public class BowController : MonoBehaviour
         if (mounted)
         {
             SetSupplyMode(ArrowSupplyMode.BackQuiver);
+            backQuiverArrowPickups = 0;
         }
         else
         {
             ClearHeldArrow();
+            backQuiverArrowPickups = 0;
         }
 
         UpdateWandRayVisibility();
@@ -294,10 +387,21 @@ public class BowController : MonoBehaviour
 
     public void SetBowGrounded(bool grounded)
     {
+        bool wasGrounded = bowGrounded;
         bowGrounded = grounded;
         if (leftHandChild != null)
         {
             leftHandChild.enabled = !grounded && !PlayEnvironment.IsDesktopInput;
+        }
+
+        // Equip tutorial / any path that enables the playable bow should reveal the ground scope.
+        if (wasGrounded && !grounded)
+        {
+            ScopePickup.NotifyBowEquipped();
+        }
+        else if (!wasGrounded && grounded)
+        {
+            ScopePickup.NotifyBowUnequipped();
         }
     }
 
@@ -441,6 +545,7 @@ public class BowController : MonoBehaviour
 
         bowColliders = GetComponentsInChildren<Collider>(true);
         CacheBowStringRest();
+        SetScopeEquipped(false);
 
         if (ShouldAutoSpawnHeldArrow)
         {
@@ -470,6 +575,7 @@ public class BowController : MonoBehaviour
     {
         PlayEnvironment.EnvironmentChanged -= RefreshMode;
         CancelDraw();
+        HideTrajectory();
     }
 
     private void Update()
@@ -491,6 +597,11 @@ public class BowController : MonoBehaviour
         }
 
         UpdateBackQuiverPickup();
+
+        if (desktop && Input.GetKeyDown(desktopToggleScopeKey))
+        {
+            SetScopeEquipped(!scopeEquipped);
+        }
     }
 
     private void LateUpdate()
@@ -522,12 +633,14 @@ public class BowController : MonoBehaviour
                 TrackedDrawVisual();
             }
 
+            UpdateTrajectoryPreview();
             return;
         }
 
         // Desktop: drive pose in LateUpdate AFTER Votanic applies VirtualTracker0 to Head.
         ApplyDesktopPose();
         UpdateWandRayVisibility();
+        UpdateTrajectoryPreview();
     }
 
     private void RefreshMode()
@@ -765,6 +878,7 @@ public class BowController : MonoBehaviour
 
         state = State.Drawing;
         draw = 0f;
+        FightAudio.PlayBowDraw(transform.position);
 
         if (desktop)
         {
@@ -787,6 +901,8 @@ public class BowController : MonoBehaviour
         Vector3 dir = desktop ? DesktopShotDirection() : ShotDirectionTracked();
         state = State.Idle;
         draw = 0f;
+        HideTrajectory();
+        FightAudio.StopBowDraw();
         rmbWasHeld = Input.GetMouseButton(1) || Input.GetKey(KeyCode.Mouse1)
                      || (desktopSpaceToShoot && Input.GetKey(KeyCode.Space));
 
@@ -840,6 +956,8 @@ public class BowController : MonoBehaviour
     {
         state = State.Idle;
         draw = 0f;
+        HideTrajectory();
+        FightAudio.StopBowDraw();
         ResetBowString();
         if (arrow == null)
         {
@@ -945,6 +1063,361 @@ public class BowController : MonoBehaviour
         }
 
         return Mathf.Lerp(minSpeed, maxSpeed, t);
+    }
+
+    private bool ShouldShowTrajectory
+    {
+        get
+        {
+            if (state != State.Drawing || arrow == null)
+            {
+                return false;
+            }
+
+            if (trajectoryRequiresScope && !scopeEquipped)
+            {
+                return false;
+            }
+
+            float power = draw;
+            if (desktop)
+            {
+                power = Mathf.Max(power, 0.15f);
+            }
+            else if (power < minDrawToShoot)
+            {
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    private void UpdateTrajectoryPreview()
+    {
+        if (!ShouldShowTrajectory)
+        {
+            HideTrajectory();
+            return;
+        }
+
+        EnsureTrajectoryLine();
+
+        float power = draw;
+        if (desktop)
+        {
+            power = Mathf.Max(power, 0.15f);
+        }
+
+        Vector3 origin = GetTrajectoryOrigin();
+        Vector3 direction = desktop ? DesktopShotDirection() : ShotDirectionTracked();
+        float speed = SpeedFromDraw(power);
+        float gravityMul = 1.35f;
+        float drag = 0.08f;
+        if (arrow != null)
+        {
+            gravityMul = arrow.GravityMultiplier;
+            drag = arrow.AirDrag;
+        }
+        else if (arrowPrefab != null)
+        {
+            gravityMul = arrowPrefab.GravityMultiplier;
+            drag = arrowPrefab.AirDrag;
+        }
+
+        int count = SimulateTrajectory(
+            origin,
+            direction * speed,
+            gravityMul,
+            drag,
+            trajectoryBuffer,
+            out bool hitsValidTarget);
+
+        if (count < 2)
+        {
+            HideTrajectory();
+            return;
+        }
+
+        trajectoryLine.enabled = true;
+        trajectoryLine.positionCount = count;
+        for (int i = 0; i < count; i++)
+        {
+            trajectoryLine.SetPosition(i, trajectoryBuffer[i]);
+        }
+
+        ApplyTrajectoryColor(hitsValidTarget ? trajectoryTargetColor : trajectoryColor);
+
+        float pathLength = 0f;
+        for (int i = 1; i < count; i++)
+        {
+            pathLength += Vector3.Distance(trajectoryBuffer[i - 1], trajectoryBuffer[i]);
+        }
+
+        float tiles = Mathf.Max(1f, pathLength / Mathf.Max(0.01f, trajectoryDashWorldSize));
+        if (trajectoryMaterial != null && trajectoryMaterial.HasProperty("_MainTex"))
+        {
+            trajectoryMaterial.mainTextureScale = new Vector2(tiles, 1f);
+        }
+    }
+
+    private void ApplyTrajectoryColor(Color color)
+    {
+        if (trajectoryLine != null)
+        {
+            trajectoryLine.startColor = color;
+            trajectoryLine.endColor = color;
+        }
+
+        if (trajectoryMaterial != null)
+        {
+            trajectoryMaterial.color = color;
+            if (trajectoryMaterial.HasProperty("_Color"))
+            {
+                trajectoryMaterial.SetColor("_Color", color);
+            }
+        }
+    }
+
+    private Vector3 GetTrajectoryOrigin()
+    {
+        if (arrow != null)
+        {
+            if (arrow.Tip != null)
+            {
+                return arrow.Tip.position;
+            }
+
+            return arrow.transform.position;
+        }
+
+        return GetArrowRestPosition();
+    }
+
+    private int SimulateTrajectory(
+        Vector3 origin,
+        Vector3 velocity,
+        float gravityMul,
+        float drag,
+        Vector3[] buffer,
+        out bool hitsValidTarget)
+    {
+        hitsValidTarget = false;
+        int maxPoints = Mathf.Min(buffer.Length, Mathf.Max(4, trajectoryPoints));
+        float dt = Mathf.Max(0.01f, trajectoryTimeStep);
+        float maxTime = Mathf.Max(dt, trajectoryMaxSeconds);
+
+        Vector3 dir0 = velocity.sqrMagnitude > 1e-6f ? velocity.normalized : transform.forward;
+        Vector3 pos = origin + dir0 * 0.08f;
+        Vector3 vel = velocity;
+        buffer[0] = pos;
+        int count = 1;
+
+        for (float t = dt; t <= maxTime && count < maxPoints; t += dt)
+        {
+            Vector3 nextVel = vel + Physics.gravity * gravityMul * dt;
+            nextVel *= Mathf.Clamp01(1f - drag * dt);
+            Vector3 nextPos = pos + nextVel * dt;
+
+            // Color probe only — never clip the arc short.
+            if (!hitsValidTarget)
+            {
+                Vector3 delta = nextPos - pos;
+                float dist = delta.magnitude;
+                if (dist > 1e-5f
+                    && TryGetTrajectoryTargetHit(pos, delta / dist, dist))
+                {
+                    hitsValidTarget = true;
+                }
+            }
+
+            pos = nextPos;
+            vel = nextVel;
+            buffer[count++] = pos;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// True if this segment crosses a crystal, fireball, or unshielded dragon
+    /// (ignores bow / hands / world blockers).
+    /// </summary>
+    private bool TryGetTrajectoryTargetHit(Vector3 origin, Vector3 direction, float distance)
+    {
+        // Aim color uses a cheap AABB probe — full triangle tests are for arrow damage only.
+        DragonBoss dragon = cachedTrajectoryDragon;
+        if (dragon == null)
+        {
+            dragon = DragonBoss.Resolve();
+            cachedTrajectoryDragon = dragon;
+        }
+
+        if (dragon != null
+            && dragon.TrajectorySegmentHitsBody(origin, direction, distance))
+        {
+            return true;
+        }
+
+        int hitCount = Physics.RaycastNonAlloc(
+            origin,
+            direction,
+            trajectoryHits,
+            distance,
+            trajectoryHitMask,
+            QueryTriggerInteraction.Collide);
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            Collider col = trajectoryHits[i].collider;
+            if (col == null || ShouldIgnoreTrajectoryHit(col))
+            {
+                continue;
+            }
+
+            if (IsTrajectoryValidTarget(col))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ShouldIgnoreTrajectoryHit(Collider col)
+    {
+        if (col == null)
+        {
+            return true;
+        }
+
+        Transform t = col.transform;
+
+        if (t == transform || t.IsChildOf(transform))
+        {
+            return true;
+        }
+
+        if (arrow != null && (t == arrow.transform || t.IsChildOf(arrow.transform)))
+        {
+            return true;
+        }
+
+        if (bowColliders != null)
+        {
+            for (int i = 0; i < bowColliders.Length; i++)
+            {
+                if (bowColliders[i] == col)
+                {
+                    return true;
+                }
+            }
+        }
+
+        if (leftHandChild != null && leftHandChild.BoundHand != null)
+        {
+            Transform hand = leftHandChild.BoundHand;
+            if (t == hand || t.IsChildOf(hand))
+            {
+                return true;
+            }
+        }
+
+        if (rightHand != null && (t == rightHand || t.IsChildOf(rightHand)))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Red-arc targets: live crystal, fireball, or unshielded dragon.
+    /// Dragon body is probed via <see cref="TryGetTrajectoryTargetHit"/> mesh raycast;
+    /// this path covers PhysX hits (crystals / fireballs / legacy colliders).
+    /// </summary>
+    private static bool IsTrajectoryValidTarget(Collider col)
+    {
+        if (col == null)
+        {
+            return false;
+        }
+
+        EnderCrystal crystal = col.GetComponentInParent<EnderCrystal>();
+        if (crystal != null && crystal.IsAlive)
+        {
+            return true;
+        }
+
+        if (col.GetComponentInParent<DragonFireball>() != null)
+        {
+            return true;
+        }
+
+        // Ignore PhysX dragon hulls — trajectory uses AABB; arrows use RaycastBody.
+        return false;
+    }
+
+    private void EnsureTrajectoryLine()
+    {
+        if (trajectoryLine != null)
+        {
+            return;
+        }
+
+        GameObject go = new GameObject("TrajectoryPreview");
+        go.transform.SetParent(transform, false);
+        trajectoryLine = go.AddComponent<LineRenderer>();
+        trajectoryLine.useWorldSpace = true;
+        trajectoryLine.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        trajectoryLine.receiveShadows = false;
+        trajectoryLine.numCapVertices = 2;
+        trajectoryLine.numCornerVertices = 2;
+        trajectoryLine.widthMultiplier = 1f;
+        trajectoryLine.startWidth = trajectoryWidth;
+        trajectoryLine.endWidth = trajectoryWidth * 0.65f;
+        trajectoryLine.alignment = LineAlignment.View;
+        trajectoryLine.textureMode = LineTextureMode.Tile;
+        trajectoryLine.material = CreateTrajectoryMaterial();
+        trajectoryMaterial = trajectoryLine.material;
+        trajectoryLine.enabled = false;
+    }
+
+    private Material CreateTrajectoryMaterial()
+    {
+        Shader shader = Shader.Find("Sprites/Default")
+                        ?? Shader.Find("Unlit/Transparent")
+                        ?? Shader.Find("Unlit/Color");
+        Material mat = new Material(shader);
+        mat.name = "ArrowTrajectoryDotted";
+        mat.color = trajectoryColor;
+
+        Texture2D dash = new Texture2D(8, 1, TextureFormat.RGBA32, false);
+        dash.wrapMode = TextureWrapMode.Repeat;
+        dash.filterMode = FilterMode.Point;
+        for (int x = 0; x < 8; x++)
+        {
+            bool on = x < 3;
+            dash.SetPixel(x, 0, on ? Color.white : new Color(1f, 1f, 1f, 0f));
+        }
+
+        dash.Apply();
+        mat.mainTexture = dash;
+        if (mat.HasProperty("_Color"))
+        {
+            mat.SetColor("_Color", trajectoryColor);
+        }
+
+        return mat;
+    }
+
+    private void HideTrajectory()
+    {
+        if (trajectoryLine != null)
+        {
+            trajectoryLine.enabled = false;
+            trajectoryLine.positionCount = 0;
+        }
     }
 
     private Vector3 GetArrowRestPosition()
@@ -1347,10 +1820,16 @@ public class BowController : MonoBehaviour
         if (!EquipArrow(instance))
         {
             Destroy(instance.gameObject);
+            return;
         }
-        else if (logInputDetection)
+
+        FightAudio.PlayEquipArrowFromQuiver(instance.transform.position);
+        backQuiverArrowPickups++;
+
+        if (logInputDetection)
         {
-            Debug.Log("BowController: picked up arrow from back quiver.", this);
+            Debug.Log("BowController: picked up arrow from back quiver ("
+                      + backQuiverArrowPickups + ").", this);
         }
     }
 

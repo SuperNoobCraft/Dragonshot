@@ -17,6 +17,8 @@ public class DragonBoss : MonoBehaviour
     [Header("Crystals")]
     [Tooltip("Optional. Empty = auto-find all EnderCrystal in the scene on Start.")]
     [SerializeField] private List<EnderCrystal> crystals = new List<EnderCrystal>();
+    [Tooltip("Optional. Empty = auto-add CrystalPillarRiseController for bury/rise intro.")]
+    [SerializeField] private CrystalPillarRiseController pillarRise;
     [Tooltip("Where crystal beams aim. Drag an empty child here, or use Create Shield Attach Point.")]
     [SerializeField] private Transform shieldAttach;
     [Tooltip("Extra offset from shieldAttach (local space). Use Y to lift beams into the body.")]
@@ -40,14 +42,46 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private bool logStateChanges = true;
 
     [Header("Fight")]
-    [SerializeField] private float roundSeconds = 90f;
-    [SerializeField, Min(1)] private int maxHp = 5;
     [SerializeField] private DragonFightUI fightUI;
     [Tooltip("If true, fight waits for the world-space Start button.")]
     [SerializeField] private bool requireStartButton = true;
     [Tooltip("Pick up bow + back quiver to begin (see DragonFightEquipStart).")]
     [SerializeField] private bool useEquipStart = true;
     [SerializeField] private DragonFightEquipStart equipStart;
+
+    [Header("Difficulty")]
+    [Tooltip("Set by which quiver is strapped on. Easy = fewer towers; Hard = crystal regrow.")]
+    [SerializeField] private FightDifficulty difficulty = FightDifficulty.Normal;
+    [Tooltip("HP, time limit, and fireball pacing for Easy.")]
+    [SerializeField] private DifficultyFightTuning easyTuning = new DifficultyFightTuning
+    {
+        maxHp = 3,
+        roundSeconds = 120f,
+        fireballInterval = 8f
+    };
+    [Tooltip("HP, time limit, and fireball pacing for Normal. Existing scenes migrate prior values here.")]
+    [SerializeField] private DifficultyFightTuning normalTuning = new DifficultyFightTuning
+    {
+        maxHp = 5,
+        roundSeconds = 90f,
+        fireballInterval = 5.5f
+    };
+    [Tooltip("HP, time limit, and fireball pacing for Hard.")]
+    [SerializeField] private DifficultyFightTuning hardTuning = new DifficultyFightTuning
+    {
+        maxHp = 7,
+        roundSeconds = 75f,
+        fireballInterval = 3.5f
+    };
+    [Tooltip("How many crystal towers rise on Easy (of the ones in the scene).")]
+    [SerializeField, Min(1)] private int easyActivePillarCount = 2;
+    [Tooltip("Hard: seconds for a destroyed crystal to fully regrow and restore the shield.")]
+    [SerializeField, Min(1f)] private float hardCrystalRegrowSeconds = 20f;
+
+    // Legacy Fight fields — migrated into normalTuning once.
+    [SerializeField, HideInInspector] private float roundSeconds = 90f;
+    [SerializeField, HideInInspector] private int maxHp = 5;
+    [SerializeField, HideInInspector] private bool difficultyTuningMigrated;
 
     [Header("Model / Animation")]
     [Tooltip("Optional Animator on the Sketchfab mesh (fly / wing flap). Auto-finds in children if empty.")]
@@ -62,6 +96,10 @@ public class DragonBoss : MonoBehaviour
     [Header("Damage")]
     [SerializeField] private Color damageFlashColor = new Color(1f, 0.12f, 0.08f, 1f);
     [SerializeField] private float damageFlashDuration = 0.28f;
+    [Tooltip("Crystal pop VFX + damage radius (meters). Dragon takes explosion damage if inside this.")]
+    [SerializeField, Min(0.1f)] private float crystalExplosionRadius = 1.8f;
+    [Tooltip("HP removed when a crystal explodes with the dragon inside Crystal Explosion Radius. Works while shielded.")]
+    [SerializeField, Min(1)] private int crystalExplosionDamage = 1;
 
     [Header("Death")]
     [Tooltip("Gravity scale while diving after death (1 = Physics.gravity).")]
@@ -87,7 +125,14 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private DragonHitColliderMode hitColliderMode = DragonHitColliderMode.MeshOnVisualChildren;
     [SerializeField] private bool autoSetupHitCollider = true;
     [SerializeField] private float hitColliderPadding = 1.08f;
-    [SerializeField] private bool meshColliderConvex = true;
+    [Tooltip("Off = accurate mesh (non-convex). Controlled HERE — not on the MeshCollider "
+             + "component (play-mode bake was overwriting that). Non-convex cannot use "
+             + "Rigidbody collisions; arrows hit via sweep. On = fat convex hull.")]
+    [SerializeField] private bool meshColliderConvex = false;
+    [Tooltip("Bake SkinnedMeshRenderer pose into MeshColliders so hits follow wing/body animation.")]
+    [SerializeField] private bool updateHitColliderWithAnimation = true;
+    [Tooltip("Seconds between BakeMesh updates. 0 = every LateUpdate.")]
+    [SerializeField, Min(0f)] private float hitColliderBakeInterval = 0.05f;
     [SerializeField] private BoxCollider hitCollider;
 
     [Header("Flight Path")]
@@ -133,8 +178,8 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private bool enableFireballs = true;
     [Tooltip("Mouth / spawn point. Defaults to Flight Lead, then this transform.")]
     [SerializeField] private Transform fireballSpawn;
-    [Tooltip("Seconds between shots while the fight is active.")]
-    [SerializeField, Min(1f)] private float fireballInterval = 5.5f;
+    [Tooltip("Legacy default interval — migrated into Normal tuning. Per-difficulty values are under Difficulty.")]
+    [SerializeField, HideInInspector, Min(1f)] private float fireballInterval = 5.5f;
     [Tooltip("Delay after Start before the first fireball.")]
     [SerializeField, Min(0f)] private float fireballFirstDelay = 2.5f;
     [Tooltip("Chance to fire when a shot is due (0–1).")]
@@ -179,6 +224,18 @@ public class DragonBoss : MonoBehaviour
     private Coroutine deathRoutine;
     private Vector3 visualScaleRootBaseScale;
     private float nextFireballTime;
+    private float nextHitColliderBakeTime;
+    private readonly List<AnimatedHitCollider> animatedHitColliders = new List<AnimatedHitCollider>(4);
+
+    private struct AnimatedHitCollider
+    {
+        public SkinnedMeshRenderer Skinned;
+        public MeshCollider Collider;
+        public Mesh BakedMesh;
+        public Vector3[] CachedVertices;
+        public int[] CachedTriangles;
+        public Bounds WorldBounds;
+    }
 
     private readonly List<BodyMaterialSlot> bodyMaterialSlots = new List<BodyMaterialSlot>(16);
 
@@ -194,12 +251,65 @@ public class DragonBoss : MonoBehaviour
     public bool IsDead => dead;
     public bool IsFightActive => phase == FightPhase.Playing && !dead && !isDying;
     public bool IsWaitingForStart => phase == FightPhase.Waiting;
+    public FightDifficulty Difficulty => difficulty;
+    public bool ShouldRegrowCrystals =>
+        difficulty == FightDifficulty.Hard && phase == FightPhase.Playing && !dead && !isDying;
+    public float HardCrystalRegrowSeconds => hardCrystalRegrowSeconds;
     public bool ShouldShowCrystalShieldVisual =>
-        (phase == FightPhase.Waiting || phase == FightPhase.Playing)
+        phase == FightPhase.Playing
         && !dead && !isDying
         && liveCrystals.Count > 0;
     public int CurrentHp => currentHp;
-    public int MaxHp => maxHp;
+    public int MaxHp => ActiveMaxHp;
+    public float RoundSeconds => ActiveRoundSeconds;
+    public float FireballInterval => ActiveFireballInterval;
+    public float CrystalExplosionRadius => Mathf.Max(0.1f, crystalExplosionRadius);
+
+    private int ActiveMaxHp => GetTuning(difficulty).maxHp;
+    private float ActiveRoundSeconds => GetTuning(difficulty).roundSeconds;
+    private float ActiveFireballInterval => Mathf.Max(1f, GetTuning(difficulty).fireballInterval);
+
+    private DifficultyFightTuning GetTuning(FightDifficulty value)
+    {
+        switch (value)
+        {
+            case FightDifficulty.Easy:
+                return easyTuning;
+            case FightDifficulty.Hard:
+                return hardTuning;
+            default:
+                return normalTuning;
+        }
+    }
+
+    private void MigrateLegacyDifficultyTuning()
+    {
+        if (!difficultyTuningMigrated)
+        {
+            // Preserve old single Fight HP / timer / fireball interval as Normal.
+            normalTuning.maxHp = Mathf.Max(1, maxHp);
+            normalTuning.roundSeconds = Mathf.Max(1f, roundSeconds);
+            normalTuning.fireballInterval = Mathf.Max(1f, fireballInterval);
+            difficultyTuningMigrated = true;
+        }
+
+        // Struct field added later may deserialize as 0 — fill sensible defaults.
+        if (easyTuning.fireballInterval < 1f)
+        {
+            easyTuning.fireballInterval = 8f;
+        }
+
+        if (normalTuning.fireballInterval < 1f)
+        {
+            normalTuning.fireballInterval = Mathf.Max(1f, fireballInterval);
+        }
+
+        if (hardTuning.fireballInterval < 1f)
+        {
+            hardTuning.fireballInterval = 3.5f;
+        }
+    }
+
     public Color CrystalEnergyColor => shieldColor;
     public float TimeRemaining => timeRemaining;
     public Vector3 ShieldAttachPoint
@@ -209,6 +319,15 @@ public class DragonBoss : MonoBehaviour
             Transform attach = shieldAttach != null ? shieldAttach : transform;
             return attach.TransformPoint(shieldAttachLocalOffset);
         }
+    }
+
+    public static DragonBoss Resolve()
+    {
+#if UNITY_2023_1_OR_NEWER
+        return FindFirstObjectByType<DragonBoss>();
+#else
+        return FindObjectOfType<DragonBoss>();
+#endif
     }
 
     public void RegisterCrystal(EnderCrystal crystal)
@@ -242,8 +361,80 @@ public class DragonBoss : MonoBehaviour
         RefreshShieldState();
     }
 
+    /// <summary>
+    /// Crystal blast damages the dragon through the shield if the body is in range.
+    /// Call only when a crystal is actually shot (not bury / suppress / teardown).
+    /// </summary>
+    public void TryDamageFromCrystalExplosion(Vector3 explosionOrigin)
+    {
+        if (!IsFightActive || crystalExplosionDamage <= 0)
+        {
+            return;
+        }
+
+        float radius = CrystalExplosionRadius;
+        if (radius <= 0f || !IsPointWithinBodyRange(explosionOrigin, radius))
+        {
+            return;
+        }
+
+        if (logStateChanges)
+        {
+            Debug.Log(
+                "DragonBoss: crystal explosion hit (r=" + radius
+                + ", dmg=" + crystalExplosionDamage
+                + ", shielded=" + IsShielded + ").",
+                this);
+        }
+
+        TakeDamage(crystalExplosionDamage);
+    }
+
+    private bool IsPointWithinBodyRange(Vector3 worldPoint, float radius)
+    {
+        float radiusSq = radius * radius;
+
+        if (animatedHitColliders.Count > 0)
+        {
+            for (int i = 0; i < animatedHitColliders.Count; i++)
+            {
+                AnimatedHitCollider slot = animatedHitColliders[i];
+                Bounds bounds;
+                if (slot.Skinned != null)
+                {
+                    bounds = slot.Skinned.bounds;
+                }
+                else if (slot.WorldBounds.size.sqrMagnitude > 1e-6f)
+                {
+                    bounds = slot.WorldBounds;
+                }
+                else
+                {
+                    continue;
+                }
+
+                Vector3 closest = bounds.ClosestPoint(worldPoint);
+                if ((closest - worldPoint).sqrMagnitude <= radiusSq)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // Fallback before bake / without mesh slots: root + shield attach.
+        if ((transform.position - worldPoint).sqrMagnitude <= radiusSq)
+        {
+            return true;
+        }
+
+        return (ShieldAttachPoint - worldPoint).sqrMagnitude <= radiusSq;
+    }
+
     private void Awake()
     {
+        MigrateLegacyDifficultyTuning();
         ResolveShieldAttach();
         EnsureShieldOutlineMaterial();
 
@@ -257,7 +448,7 @@ public class DragonBoss : MonoBehaviour
         EnsureFireballSettings();
         spawnPosition = transform.position;
         spawnRotation = transform.rotation;
-        currentHp = maxHp;
+        currentHp = ActiveMaxHp;
 
         CacheDragonHitColliders();
         EnsureShieldVisual();
@@ -278,6 +469,26 @@ public class DragonBoss : MonoBehaviour
         {
             equipStart = FindObjectOfType<DragonFightEquipStart>();
         }
+
+        EnsurePillarRiseController();
+    }
+
+    private void EnsurePillarRiseController()
+    {
+        if (pillarRise == null)
+        {
+            pillarRise = GetComponent<CrystalPillarRiseController>();
+        }
+
+        if (pillarRise == null)
+        {
+            pillarRise = FindObjectOfType<CrystalPillarRiseController>();
+        }
+
+        if (pillarRise == null)
+        {
+            pillarRise = gameObject.AddComponent<CrystalPillarRiseController>();
+        }
     }
 
     private void Start()
@@ -295,6 +506,12 @@ public class DragonBoss : MonoBehaviour
         CollectCrystals();
         FixCrystalPillarColliders();
         CacheBodyVisualMaterials();
+        EnsurePillarRiseController();
+        if (pillarRise != null)
+        {
+            pillarRise.CachePillars();
+            pillarRise.SnapBuriedAndDisableCrystals();
+        }
 
         if (requireStartButton)
         {
@@ -317,7 +534,7 @@ public class DragonBoss : MonoBehaviour
             timeRemaining -= Time.deltaTime;
             if (fightUI != null)
             {
-                fightUI.ShowTimer(timeRemaining, currentHp, maxHp);
+                fightUI.ShowTimer(timeRemaining, currentHp, ActiveMaxHp);
             }
 
             if (timeRemaining <= 0f)
@@ -337,19 +554,67 @@ public class DragonBoss : MonoBehaviour
             shieldMaterial.SetFloat("_OutlineWidth", baseOutlineWidth * pulse);
         }
 
-        if (shieldMaterial.HasProperty("_Color"))
+        ApplyShieldDamageFlash();
+    }
+
+    private void ApplyShieldDamageFlash()
+    {
+        if (shieldMaterial == null || !shieldMaterial.HasProperty("_Color"))
         {
-            float brightness = 0.88f + 0.12f * (0.5f + 0.5f * Mathf.Sin(Time.time * shieldPulseSpeed));
-            Color c = shieldColor * brightness;
-            c.a = shieldColor.a;
-            shieldMaterial.SetColor("_Color", c);
+            return;
         }
+
+        float brightness = 0.88f + 0.12f * (0.5f + 0.5f * Mathf.Sin(Time.time * shieldPulseSpeed));
+        Color c = shieldColor * brightness;
+        c.a = shieldColor.a;
+
+        if (Time.time < damageFlashEndTime && damageFlashDuration > 1e-4f)
+        {
+            float remaining = damageFlashEndTime - Time.time;
+            float flashT = Mathf.Sin(Mathf.Clamp01(remaining / damageFlashDuration) * Mathf.PI);
+            c = Color.Lerp(c, damageFlashColor, flashT);
+            c.a = shieldColor.a;
+        }
+
+        shieldMaterial.SetColor("_Color", c);
+    }
+
+    private void LateUpdate()
+    {
+        UpdateAnimatedHitColliders();
+    }
+
+    private void OnDestroy()
+    {
+        ClearAnimatedHitColliders();
     }
 
     /// <summary>Begin a timed fight from the world-space Start panel.</summary>
     public void StartFight()
     {
         ResetFightState(beginPlaying: true);
+    }
+
+    /// <summary>Chosen by which difficulty quiver is strapped on before the fight.</summary>
+    public void SetDifficulty(FightDifficulty value)
+    {
+        difficulty = value;
+
+        // Waiting / equip phase: preview HP and timer for the chosen difficulty.
+        if (phase != FightPhase.Playing && !dead && !isDying)
+        {
+            timeRemaining = ActiveRoundSeconds;
+            currentHp = ActiveMaxHp;
+        }
+
+        if (logStateChanges)
+        {
+            Debug.Log(
+                "DragonBoss: difficulty = " + difficulty
+                + " (" + ActiveMaxHp + " HP, " + ActiveRoundSeconds + "s, fireball "
+                + ActiveFireballInterval + "s)",
+                this);
+        }
     }
 
     /// <summary>Restore crystals, dragon, and shield; return to Start.</summary>
@@ -368,8 +633,8 @@ public class DragonBoss : MonoBehaviour
 
         isDying = false;
         dead = false;
-        timeRemaining = roundSeconds;
-        currentHp = maxHp;
+        timeRemaining = ActiveRoundSeconds;
+        currentHp = ActiveMaxHp;
         damageFlashEndTime = 0f;
         CacheFlightMarkers();
         ClearFireballs();
@@ -395,6 +660,7 @@ public class DragonBoss : MonoBehaviour
         {
             if (crystals[i] != null)
             {
+                crystals[i].CancelRegrow();
                 crystals[i].Revive();
             }
         }
@@ -406,23 +672,42 @@ public class DragonBoss : MonoBehaviour
             RebuildMeshShieldOutline();
         }
 
+        EnsurePillarRiseController();
+
         if (beginPlaying)
         {
             phase = FightPhase.Playing;
             SetAnimatorRunning(true, aliveAnimSpeed);
+            if (pillarRise != null)
+            {
+                int riseCount = difficulty == FightDifficulty.Easy
+                    ? easyActivePillarCount
+                    : -1;
+                pillarRise.BeginRiseIntro(riseCount);
+            }
+
+            // Drop any Easy-mode leftovers from the live shield list.
             RefreshShieldState();
             if (fightUI != null)
             {
-                fightUI.ShowTimer(timeRemaining, currentHp, maxHp);
+                fightUI.ShowTimer(timeRemaining, currentHp, ActiveMaxHp);
             }
 
             if (logStateChanges)
             {
-                Debug.Log("DragonBoss: fight started (" + roundSeconds + "s).", this);
+                Debug.Log(
+                    "DragonBoss: fight started (" + ActiveRoundSeconds + "s, "
+                    + ActiveMaxHp + " HP, " + difficulty + ").",
+                    this);
             }
         }
         else
         {
+            if (pillarRise != null)
+            {
+                pillarRise.BeginRetreat();
+            }
+
             EnterWaiting();
         }
     }
@@ -432,9 +717,18 @@ public class DragonBoss : MonoBehaviour
         phase = FightPhase.Waiting;
         dead = false;
         isDying = false;
-        timeRemaining = roundSeconds;
-        currentHp = maxHp;
+        timeRemaining = ActiveRoundSeconds;
+        currentHp = ActiveMaxHp;
         SetAnimatorRunning(true, idleAnimSpeed);
+        if (pillarRise != null)
+        {
+            // Keep retreating if already in motion; otherwise ensure buried.
+            if (!pillarRise.IsIntroPlaying)
+            {
+                pillarRise.SnapBuriedAndDisableCrystals();
+            }
+        }
+
         RefreshShieldState();
         RestoreBodyVisuals();
 
@@ -534,7 +828,7 @@ public class DragonBoss : MonoBehaviour
             return;
         }
 
-        nextFireballTime = Time.time + fireballInterval;
+        nextFireballTime = Time.time + ActiveFireballInterval;
 
         if (Random.value > fireballChance)
         {
@@ -786,23 +1080,37 @@ public class DragonBoss : MonoBehaviour
         }
 
         currentHp = Mathf.Max(0, currentHp - amount);
-        damageFlashEndTime = Time.time + damageFlashDuration;
-        FightAudio.PlayDragonHurt(transform.position);
+        TriggerHurtFeedback();
 
         if (fightUI != null)
         {
-            fightUI.ShowTimer(timeRemaining, currentHp, maxHp);
+            fightUI.ShowTimer(timeRemaining, currentHp, ActiveMaxHp);
         }
 
         if (logStateChanges)
         {
-            Debug.Log("DragonBoss: hit — HP " + currentHp + "/" + maxHp, this);
+            Debug.Log("DragonBoss: hit — HP " + currentHp + "/" + ActiveMaxHp, this);
         }
 
         if (currentHp <= 0)
         {
             BeginDeathSequence();
         }
+    }
+
+    private void TriggerHurtFeedback()
+    {
+        damageFlashEndTime = Time.time + damageFlashDuration;
+        FightAudio.PlayDragonHurt(transform.position);
+
+        if (bodyMaterialSlots.Count == 0)
+        {
+            CacheBodyVisualMaterials();
+        }
+
+        // Apply red tint this frame (don't wait for next Update).
+        UpdateDamageFlash();
+        ApplyShieldDamageFlash();
     }
 
     private void BeginDeathSequence()
@@ -931,7 +1239,18 @@ public class DragonBoss : MonoBehaviour
 
         if (fightUI != null)
         {
-            fightUI.ShowVictory(timeRemaining);
+            bool usedScope = false;
+#if UNITY_2023_1_OR_NEWER
+            BowController bow = FindFirstObjectByType<BowController>(FindObjectsInactive.Include);
+#else
+            BowController bow = FindObjectOfType<BowController>(true);
+#endif
+            if (bow != null)
+            {
+                usedScope = bow.HasScopeEquipped;
+            }
+
+            fightUI.ShowVictory(timeRemaining, usedScope);
         }
     }
 
@@ -1559,6 +1878,7 @@ public class DragonBoss : MonoBehaviour
     private void SetupMeshHitColliders()
     {
         DisableRootPrimitiveHitColliders();
+        ClearAnimatedHitColliders();
 
         int created = 0;
         Renderer[] renderers = GetComponentsInChildren<Renderer>(true);
@@ -1575,28 +1895,41 @@ public class DragonBoss : MonoBehaviour
                 continue;
             }
 
-            MeshCollider meshCollider = renderer.GetComponent<MeshCollider>();
-            if (meshCollider == null)
+            MeshCollider meshCollider;
+            if (renderer is SkinnedMeshRenderer skinned && updateHitColliderWithAnimation)
             {
-                meshCollider = renderer.gameObject.AddComponent<MeshCollider>();
+                // Keep hit mesh on a child with no Rigidbody — Unity forces convex
+                // on any MeshCollider that shares a GameObject with a Rigidbody.
+                DisableMeshColliderOn(renderer.gameObject);
+                meshCollider = GetOrCreateHitProxyCollider(skinned);
+                RegisterAnimatedHitCollider(skinned, meshCollider);
+            }
+            else
+            {
+                meshCollider = renderer.GetComponent<MeshCollider>();
+                if (meshCollider == null)
+                {
+                    meshCollider = renderer.gameObject.AddComponent<MeshCollider>();
+                }
+
+                meshCollider.sharedMesh = mesh;
+                ApplyMeshColliderConvexSetting(meshCollider);
             }
 
-            meshCollider.sharedMesh = mesh;
-            meshCollider.convex = meshColliderConvex;
             meshCollider.isTrigger = false;
             meshCollider.enabled = true;
 
-            DragonHitRelay relay = renderer.GetComponent<DragonHitRelay>();
+            DragonHitRelay relay = meshCollider.GetComponent<DragonHitRelay>();
             if (relay == null)
             {
-                relay = renderer.gameObject.AddComponent<DragonHitRelay>();
+                relay = meshCollider.gameObject.AddComponent<DragonHitRelay>();
             }
 
             relay.Bind(this);
             created++;
         }
 
-        // Respect manually placed mesh colliders on visual children too.
+        // Wire any manually placed mesh colliders (skip hit proxies already handled).
         MeshCollider[] existing = GetComponentsInChildren<MeshCollider>(true);
         for (int i = 0; i < existing.Length; i++)
         {
@@ -1612,8 +1945,31 @@ public class DragonBoss : MonoBehaviour
                 continue;
             }
 
-            if (meshCollider.gameObject.name.EndsWith("_ShieldOutline"))
+            if (meshCollider.gameObject.name.EndsWith("_ShieldOutline")
+                || meshCollider.gameObject.name.StartsWith(HitProxyName))
             {
+                continue;
+            }
+
+            SkinnedMeshRenderer skinned = meshCollider.GetComponent<SkinnedMeshRenderer>();
+            if (skinned != null && updateHitColliderWithAnimation)
+            {
+                // Prefer proxy — disable leftover collider on the skinned object.
+                DisableMeshColliderOn(meshCollider.gameObject);
+                MeshCollider proxy = GetOrCreateHitProxyCollider(skinned);
+                if (!IsAnimatedHitColliderRegistered(proxy))
+                {
+                    RegisterAnimatedHitCollider(skinned, proxy);
+                }
+
+                DragonHitRelay proxyRelay = proxy.GetComponent<DragonHitRelay>();
+                if (proxyRelay == null)
+                {
+                    proxyRelay = proxy.gameObject.AddComponent<DragonHitRelay>();
+                }
+
+                proxyRelay.Bind(this);
+                created++;
                 continue;
             }
 
@@ -1624,7 +1980,7 @@ public class DragonBoss : MonoBehaviour
                 meshCollider.sharedMesh = mesh;
             }
 
-            meshCollider.convex = meshColliderConvex;
+            ApplyMeshColliderConvexSetting(meshCollider);
             meshCollider.isTrigger = false;
             meshCollider.enabled = true;
 
@@ -1638,11 +1994,19 @@ public class DragonBoss : MonoBehaviour
             created++;
         }
 
+        BakeAnimatedHitColliders(force: true);
         CacheDragonHitColliders();
 
         if (logStateChanges)
         {
-            Debug.Log("DragonBoss: mesh hit collider(s) ready — " + dragonHitColliders.Length + " collider(s).", this);
+            Debug.Log(
+                "DragonBoss: mesh hit collider(s) ready — "
+                + dragonHitColliders.Length + " collider(s)"
+                + (updateHitColliderWithAnimation
+                    ? " (animated bake " + animatedHitColliders.Count + ")"
+                    : string.Empty)
+                + ", convex=" + meshColliderConvex + ".",
+                this);
         }
 
         if (created == 0 && logStateChanges)
@@ -1652,6 +2016,587 @@ public class DragonBoss : MonoBehaviour
                 + "or add MeshCollider manually, then use Setup Hit Colliders.",
                 this);
         }
+    }
+
+    private Transform hitColliderRoot;
+    private bool loggedConvexForceWarning;
+
+    private const string HitProxyName = "HitColliderProxy";
+    private const string HitRootName = "HitColliderRoot";
+
+    private static void DisableMeshColliderOn(GameObject go)
+    {
+        if (go == null)
+        {
+            return;
+        }
+
+        MeshCollider col = go.GetComponent<MeshCollider>();
+        if (col != null)
+        {
+            col.enabled = false;
+            col.sharedMesh = null;
+        }
+
+        // Remove old proxies that lived under the skinned mesh (non-uniform scale forced convex).
+        Transform legacy = go.transform.Find(HitProxyName);
+        if (legacy != null)
+        {
+            if (Application.isPlaying)
+            {
+                Destroy(legacy.gameObject);
+            }
+            else
+            {
+                DestroyImmediate(legacy.gameObject);
+            }
+        }
+    }
+
+    private Transform EnsureHitColliderRoot()
+    {
+        if (hitColliderRoot != null)
+        {
+            SyncHitColliderRootUniformScale();
+            return hitColliderRoot;
+        }
+
+        Transform existing = transform.Find(HitRootName);
+        if (existing != null)
+        {
+            hitColliderRoot = existing;
+        }
+        else
+        {
+            GameObject rootGo = new GameObject(HitRootName);
+            hitColliderRoot = rootGo.transform;
+            hitColliderRoot.SetParent(transform, false);
+        }
+
+        SyncHitColliderRootUniformScale();
+        return hitColliderRoot;
+    }
+
+    /// <summary>
+    /// Unity forces MeshCollider.convex when any ancestor has non-uniform scale.
+    /// Keep this root at world scale (1,1,1) so non-convex hit meshes are allowed.
+    /// </summary>
+    private void SyncHitColliderRootUniformScale()
+    {
+        if (hitColliderRoot == null)
+        {
+            return;
+        }
+
+        hitColliderRoot.localPosition = Vector3.zero;
+        hitColliderRoot.localRotation = Quaternion.identity;
+        Vector3 parentLossy = transform.lossyScale;
+        hitColliderRoot.localScale = new Vector3(
+            InverseScaleComponent(parentLossy.x),
+            InverseScaleComponent(parentLossy.y),
+            InverseScaleComponent(parentLossy.z));
+    }
+
+    private static float InverseScaleComponent(float value)
+    {
+        return Mathf.Abs(value) < 0.0001f ? 1f : 1f / value;
+    }
+
+    private MeshCollider GetOrCreateHitProxyCollider(SkinnedMeshRenderer skinned)
+    {
+        Transform root = EnsureHitColliderRoot();
+        string proxyName = HitProxyName + "_" + skinned.gameObject.name;
+        Transform proxy = root.Find(proxyName);
+        if (proxy == null)
+        {
+            GameObject go = new GameObject(proxyName);
+            proxy = go.transform;
+            proxy.SetParent(root, false);
+        }
+
+        Rigidbody rb = proxy.GetComponent<Rigidbody>();
+        if (rb != null)
+        {
+            if (Application.isPlaying)
+            {
+                Destroy(rb);
+            }
+            else
+            {
+                DestroyImmediate(rb);
+            }
+        }
+
+        MeshCollider meshCollider = proxy.GetComponent<MeshCollider>();
+        if (meshCollider == null)
+        {
+            meshCollider = proxy.gameObject.AddComponent<MeshCollider>();
+        }
+
+        return meshCollider;
+    }
+
+    private void SyncHitProxyPose(SkinnedMeshRenderer skinned, Transform proxy)
+    {
+        // Match the skinned mesh pose while keeping uniform world scale (1,1,1).
+        proxy.position = skinned.transform.position;
+        proxy.rotation = skinned.transform.rotation;
+
+        Vector3 parentLossy = proxy.parent != null ? proxy.parent.lossyScale : Vector3.one;
+        proxy.localScale = new Vector3(
+            InverseScaleComponent(parentLossy.x),
+            InverseScaleComponent(parentLossy.y),
+            InverseScaleComponent(parentLossy.z));
+    }
+
+    /// <summary>
+    /// Apply convex flag after mesh assign. Strips Rigidbody so Unity cannot force convex on.
+    /// </summary>
+    private void ApplyMeshColliderConvexSetting(MeshCollider meshCollider)
+    {
+        if (meshCollider == null)
+        {
+            return;
+        }
+
+        Rigidbody rb = meshCollider.GetComponent<Rigidbody>();
+        if (rb != null && !meshColliderConvex)
+        {
+            if (Application.isPlaying)
+            {
+                Destroy(rb);
+            }
+            else
+            {
+                DestroyImmediate(rb);
+            }
+        }
+
+        meshCollider.convex = meshColliderConvex;
+
+        if (!meshColliderConvex && meshCollider.convex && !loggedConvexForceWarning)
+        {
+            loggedConvexForceWarning = true;
+            Debug.LogWarning(
+                "DragonBoss: Unity still forced MeshCollider.convex on '"
+                + meshCollider.name
+                + "'. Usually caused by non-uniform scale in the hierarchy.",
+                meshCollider);
+        }
+    }
+
+    private void RegisterAnimatedHitCollider(SkinnedMeshRenderer skinned, MeshCollider meshCollider)
+    {
+        if (skinned == null || meshCollider == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < animatedHitColliders.Count; i++)
+        {
+            if (animatedHitColliders[i].Collider == meshCollider)
+            {
+                return;
+            }
+        }
+
+        Mesh baked = new Mesh();
+        baked.name = skinned.name + "_HitBake";
+        baked.MarkDynamic();
+
+        animatedHitColliders.Add(new AnimatedHitCollider
+        {
+            Skinned = skinned,
+            Collider = meshCollider,
+            BakedMesh = baked
+        });
+    }
+
+    private bool IsAnimatedHitColliderRegistered(MeshCollider meshCollider)
+    {
+        for (int i = 0; i < animatedHitColliders.Count; i++)
+        {
+            if (animatedHitColliders[i].Collider == meshCollider)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void ClearAnimatedHitColliders()
+    {
+        for (int i = 0; i < animatedHitColliders.Count; i++)
+        {
+            Mesh baked = animatedHitColliders[i].BakedMesh;
+            if (baked == null)
+            {
+                continue;
+            }
+
+            if (Application.isPlaying)
+            {
+                Destroy(baked);
+            }
+            else
+            {
+                DestroyImmediate(baked);
+            }
+        }
+
+        animatedHitColliders.Clear();
+        nextHitColliderBakeTime = 0f;
+    }
+
+    private void UpdateAnimatedHitColliders()
+    {
+        if (!updateHitColliderWithAnimation
+            || hitColliderMode != DragonHitColliderMode.MeshOnVisualChildren
+            || animatedHitColliders.Count == 0
+            || dead
+            || isDying)
+        {
+            return;
+        }
+
+        if (hitColliderBakeInterval > 0f && Time.time < nextHitColliderBakeTime)
+        {
+            return;
+        }
+
+        BakeAnimatedHitColliders(force: false);
+        nextHitColliderBakeTime = Time.time + hitColliderBakeInterval;
+    }
+
+    private void BakeAnimatedHitColliders(bool force)
+    {
+        EnsureHitColliderRoot();
+
+        for (int i = 0; i < animatedHitColliders.Count; i++)
+        {
+            AnimatedHitCollider slot = animatedHitColliders[i];
+            if (slot.Skinned == null || slot.Collider == null || slot.BakedMesh == null)
+            {
+                continue;
+            }
+
+            Transform proxy = slot.Collider.transform;
+            SyncHitProxyPose(slot.Skinned, proxy);
+
+            // Bake in skinned local space, then move verts into the uniform-scale proxy.
+            slot.Skinned.BakeMesh(slot.BakedMesh, false);
+            Matrix4x4 skinnedToProxy =
+                proxy.worldToLocalMatrix * slot.Skinned.transform.localToWorldMatrix;
+            Vector3[] vertices = slot.BakedMesh.vertices;
+            for (int v = 0; v < vertices.Length; v++)
+            {
+                vertices[v] = skinnedToProxy.MultiplyPoint3x4(vertices[v]);
+            }
+
+            slot.BakedMesh.vertices = vertices;
+            slot.BakedMesh.RecalculateBounds();
+
+            // Cache CPU copies — Mesh.vertices/triangles allocate every access.
+            AnimatedHitCollider updated = slot;
+            updated.CachedVertices = vertices;
+            updated.CachedTriangles = slot.BakedMesh.triangles;
+            updated.WorldBounds = TransformBounds(slot.BakedMesh.bounds, proxy.localToWorldMatrix);
+            animatedHitColliders[i] = updated;
+
+            // Keep PhysX MeshCollider off — Unity's convex hull fills wing gaps.
+            // Arrow hits use triangle raycasts against BakedMesh instead.
+            slot.Collider.sharedMesh = null;
+            slot.Collider.enabled = false;
+            ApplyMeshColliderConvexSetting(slot.Collider);
+        }
+    }
+
+    private static Bounds TransformBounds(Bounds localBounds, Matrix4x4 localToWorld)
+    {
+        Vector3 c = localBounds.center;
+        Vector3 e = localBounds.extents;
+        Bounds world = new Bounds(localToWorld.MultiplyPoint3x4(c), Vector3.zero);
+        for (int x = -1; x <= 1; x += 2)
+        {
+            for (int y = -1; y <= 1; y += 2)
+            {
+                for (int z = -1; z <= 1; z += 2)
+                {
+                    Vector3 corner = c + new Vector3(e.x * x, e.y * y, e.z * z);
+                    world.Encapsulate(localToWorld.MultiplyPoint3x4(corner));
+                }
+            }
+        }
+
+        // Slight pad so thin trailing edges still catch trajectory segments.
+        world.Expand(0.15f);
+        return world;
+    }
+
+    /// <summary>
+    /// Cheap aim-assist probe for trajectory color (AABB only — not for damage).
+    /// Uses live skinned bounds so it stays cheap while the dragon moves.
+    /// </summary>
+    public bool TrajectorySegmentHitsBody(Vector3 origin, Vector3 direction, float distance)
+    {
+        if (!IsFightActive || IsDead || IsShielded || distance <= 0f)
+        {
+            return false;
+        }
+
+        if (direction.sqrMagnitude < 1e-8f)
+        {
+            return false;
+        }
+
+        direction.Normalize();
+        for (int i = 0; i < animatedHitColliders.Count; i++)
+        {
+            AnimatedHitCollider slot = animatedHitColliders[i];
+            Bounds bounds;
+            if (slot.Skinned != null)
+            {
+                bounds = slot.Skinned.bounds;
+            }
+            else if (slot.WorldBounds.size.sqrMagnitude > 1e-6f)
+            {
+                bounds = slot.WorldBounds;
+            }
+            else
+            {
+                continue;
+            }
+
+            bounds.Expand(0.15f);
+            if (RayIntersectsAabb(origin, direction, distance, bounds))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool RayIntersectsAabb(
+        Vector3 origin,
+        Vector3 direction,
+        float maxDistance,
+        Bounds bounds)
+    {
+        // Slab test against axis-aligned bounds.
+        Vector3 min = bounds.min;
+        Vector3 max = bounds.max;
+        float tMin = 0f;
+        float tMax = maxDistance;
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            float o = origin[axis];
+            float d = direction[axis];
+            float bMin = min[axis];
+            float bMax = max[axis];
+
+            if (Mathf.Abs(d) < 1e-8f)
+            {
+                if (o < bMin || o > bMax)
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            float inv = 1f / d;
+            float t1 = (bMin - o) * inv;
+            float t2 = (bMax - o) * inv;
+            if (t1 > t2)
+            {
+                float tmp = t1;
+                t1 = t2;
+                t2 = tmp;
+            }
+
+            if (t1 > tMin)
+            {
+                tMin = t1;
+            }
+
+            if (t2 < tMax)
+            {
+                tMax = t2;
+            }
+
+            if (tMin > tMax)
+            {
+                return false;
+            }
+        }
+
+        return tMax >= 0f;
+    }
+
+    /// <summary>
+    /// Accurate body hit test against the posed bake meshes (ignores PhysX convex hulls).
+    /// </summary>
+    public bool RaycastBody(Ray worldRay, float maxDistance, out Vector3 point, out Collider hitCollider)
+    {
+        point = default;
+        hitCollider = null;
+        if (animatedHitColliders.Count == 0 || maxDistance <= 0f)
+        {
+            return false;
+        }
+
+        Vector3 origin = worldRay.origin;
+        Vector3 direction = worldRay.direction;
+        if (direction.sqrMagnitude < 1e-8f)
+        {
+            return false;
+        }
+
+        direction.Normalize();
+        float best = maxDistance;
+        bool any = false;
+
+        for (int i = 0; i < animatedHitColliders.Count; i++)
+        {
+            AnimatedHitCollider slot = animatedHitColliders[i];
+            if (slot.BakedMesh == null || slot.Collider == null)
+            {
+                continue;
+            }
+
+            // Broadphase: skip meshes the ray cannot reach.
+            if (slot.WorldBounds.size.sqrMagnitude > 1e-6f
+                && !RayIntersectsAabb(origin, direction, best, slot.WorldBounds))
+            {
+                continue;
+            }
+
+            Vector3[] verts = slot.CachedVertices;
+            int[] tris = slot.CachedTriangles;
+            if (verts == null || tris == null)
+            {
+                verts = slot.BakedMesh.vertices;
+                tris = slot.BakedMesh.triangles;
+            }
+
+            if (RaycastMeshTriangles(
+                    verts,
+                    tris,
+                    slot.Collider.transform.localToWorldMatrix,
+                    origin,
+                    direction,
+                    best,
+                    out float dist,
+                    out Vector3 p,
+                    out _))
+            {
+                best = dist;
+                point = p;
+                hitCollider = slot.Collider;
+                any = true;
+            }
+        }
+
+        return any;
+    }
+
+    private static bool RaycastMeshTriangles(
+        Vector3[] verts,
+        int[] tris,
+        Matrix4x4 localToWorld,
+        Vector3 origin,
+        Vector3 direction,
+        float maxDistance,
+        out float distance,
+        out Vector3 point,
+        out Vector3 normal)
+    {
+        distance = 0f;
+        point = default;
+        normal = Vector3.up;
+
+        if (verts == null || tris == null || tris.Length < 3)
+        {
+            return false;
+        }
+
+        bool hit = false;
+        float best = maxDistance;
+        Ray worldRay = new Ray(origin, direction);
+
+        for (int i = 0; i < tris.Length; i += 3)
+        {
+            Vector3 a = localToWorld.MultiplyPoint3x4(verts[tris[i]]);
+            Vector3 b = localToWorld.MultiplyPoint3x4(verts[tris[i + 1]]);
+            Vector3 c = localToWorld.MultiplyPoint3x4(verts[tris[i + 2]]);
+
+            if (!RayTriangle(worldRay, a, b, c, out float t, out Vector3 n) || t < 0f || t > best)
+            {
+                continue;
+            }
+
+            best = t;
+            distance = t;
+            point = worldRay.GetPoint(t);
+            normal = n;
+            hit = true;
+        }
+
+        return hit;
+    }
+
+    // Möller–Trumbore
+    private static bool RayTriangle(
+        Ray ray,
+        Vector3 v0,
+        Vector3 v1,
+        Vector3 v2,
+        out float t,
+        out Vector3 normal)
+    {
+        t = 0f;
+        normal = Vector3.zero;
+
+        Vector3 e1 = v1 - v0;
+        Vector3 e2 = v2 - v0;
+        Vector3 pvec = Vector3.Cross(ray.direction, e2);
+        float det = Vector3.Dot(e1, pvec);
+        if (det > -1e-8f && det < 1e-8f)
+        {
+            return false;
+        }
+
+        float invDet = 1f / det;
+        Vector3 tvec = ray.origin - v0;
+        float u = Vector3.Dot(tvec, pvec) * invDet;
+        if (u < 0f || u > 1f)
+        {
+            return false;
+        }
+
+        Vector3 qvec = Vector3.Cross(tvec, e1);
+        float v = Vector3.Dot(ray.direction, qvec) * invDet;
+        if (v < 0f || u + v > 1f)
+        {
+            return false;
+        }
+
+        t = Vector3.Dot(e2, qvec) * invDet;
+        if (t < 1e-5f)
+        {
+            return false;
+        }
+
+        normal = Vector3.Cross(e1, e2).normalized;
+        if (Vector3.Dot(normal, ray.direction) > 0f)
+        {
+            normal = -normal;
+        }
+
+        return true;
     }
 
     private void DisableRootPrimitiveHitColliders()
@@ -1695,6 +2640,8 @@ public class DragonBoss : MonoBehaviour
 
     private void FitBoxHitCollider()
     {
+        ClearAnimatedHitColliders();
+
         if (!TryGetVisualBounds(out Bounds worldBounds))
         {
             worldBounds = new Bounds(transform.position, new Vector3(3f, 2f, 4f));
@@ -1841,44 +2788,19 @@ public class DragonBoss : MonoBehaviour
     {
         List<Collider> list = new List<Collider>();
 
-        if (hitColliderMode == DragonHitColliderMode.BoxOnRoot && hitCollider != null && hitCollider.enabled)
+        if (hitColliderMode == DragonHitColliderMode.BoxOnRoot && hitCollider != null)
         {
             list.Add(hitCollider);
         }
-
-        Collider[] cols = GetComponentsInChildren<Collider>(true);
-        for (int i = 0; i < cols.Length; i++)
+        else
         {
-            if (cols[i] == null)
+            // Mesh mode: only the animated hit proxies (not every child collider).
+            for (int i = 0; i < animatedHitColliders.Count; i++)
             {
-                continue;
-            }
-
-            if (cols[i].GetComponentInParent<EnderCrystal>() != null)
-            {
-                continue;
-            }
-
-            if (cols[i].GetComponentInParent<DragonFightUI>() != null)
-            {
-                continue;
-            }
-
-            if (cols[i] is CharacterController)
-            {
-                continue;
-            }
-
-            if (hitColliderMode == DragonHitColliderMode.MeshOnVisualChildren
-                && cols[i] is BoxCollider
-                && cols[i].transform == transform)
-            {
-                continue;
-            }
-
-            if (!list.Contains(cols[i]))
-            {
-                list.Add(cols[i]);
+                if (animatedHitColliders[i].Collider != null)
+                {
+                    list.Add(animatedHitColliders[i].Collider);
+                }
             }
         }
 
@@ -1894,10 +2816,20 @@ public class DragonBoss : MonoBehaviour
 
         for (int i = 0; i < dragonHitColliders.Length; i++)
         {
-            if (dragonHitColliders[i] != null)
+            if (dragonHitColliders[i] == null)
             {
-                dragonHitColliders[i].enabled = enabled;
+                continue;
             }
+
+            // Mesh-mode hits use triangle raycasts; PhysX MeshColliders stay off so
+            // Unity's convex hull cannot swallow the gaps under the wings.
+            if (hitColliderMode == DragonHitColliderMode.MeshOnVisualChildren && !meshColliderConvex)
+            {
+                dragonHitColliders[i].enabled = false;
+                continue;
+            }
+
+            dragonHitColliders[i].enabled = enabled;
         }
     }
 
@@ -2453,9 +3385,139 @@ public class DragonBoss : MonoBehaviour
 
             Gizmos.matrix = old;
         }
+
+        if (animatedHitColliders == null)
+        {
+            return;
+        }
+
+        Gizmos.color = new Color(0.2f, 1f, 0.4f, 0.85f);
+        for (int i = 0; i < animatedHitColliders.Count; i++)
+        {
+            AnimatedHitCollider slot = animatedHitColliders[i];
+            if (slot.BakedMesh == null || slot.Collider == null)
+            {
+                continue;
+            }
+
+            Gizmos.matrix = slot.Collider.transform.localToWorldMatrix;
+            Gizmos.DrawWireMesh(slot.BakedMesh);
+        }
+
+        Gizmos.matrix = Matrix4x4.identity;
+    }
+
+    [ContextMenu("Fix Crystal Pillar Colliders (Capsule → Mesh)")]
+    public void FixCrystalPillarCollidersMenu()
+    {
+        int fixedCount = FixCrystalPillarColliders();
+        Debug.Log("DragonBoss: fixed " + fixedCount + " crystal pillar collider(s).", this);
+    }
+
+    /// <summary>
+    /// Unity cylinder primitives ship with CapsuleColliders (rounded ends). Swap to MeshCollider
+    /// so hitboxes match the flat-capped cylinder mesh.
+    /// </summary>
+    private int FixCrystalPillarColliders()
+    {
+        int fixedCount = 0;
+
+        for (int i = 0; i < crystals.Count; i++)
+        {
+            EnderCrystal crystal = crystals[i];
+            if (crystal == null)
+            {
+                continue;
+            }
+
+            Transform pillar = crystal.transform.parent;
+            if (pillar == null)
+            {
+                continue;
+            }
+
+            if (ReplaceCapsuleWithMeshCollider(pillar.gameObject))
+            {
+                fixedCount++;
+            }
+        }
+
+        // Also catch named pillars that may not be crystal parents yet.
+        for (int i = 1; i <= 8; i++)
+        {
+            GameObject pillar = GameObject.Find("CrystalPillar_" + i);
+            if (pillar == null)
+            {
+                continue;
+            }
+
+            if (ReplaceCapsuleWithMeshCollider(pillar))
+            {
+                fixedCount++;
+            }
+        }
+
+        return fixedCount;
+    }
+
+    private static bool ReplaceCapsuleWithMeshCollider(GameObject go)
+    {
+        if (go == null)
+        {
+            return false;
+        }
+
+        CapsuleCollider capsule = go.GetComponent<CapsuleCollider>();
+        if (capsule == null)
+        {
+            return false;
+        }
+
+        MeshFilter filter = go.GetComponent<MeshFilter>();
+        Mesh mesh = filter != null ? filter.sharedMesh : null;
+        if (mesh == null)
+        {
+            return false;
+        }
+
+        bool wasTrigger = capsule.isTrigger;
+        PhysicMaterial material = capsule.sharedMaterial;
+
+        // Immediate: avoid one frame with both CapsuleCollider + MeshCollider.
+        DestroyImmediate(capsule);
+
+        MeshCollider meshCol = go.GetComponent<MeshCollider>();
+        if (meshCol == null)
+        {
+            meshCol = go.AddComponent<MeshCollider>();
+        }
+
+        meshCol.sharedMesh = mesh;
+        // Static pillars: non-convex matches the true cylinder (flat caps).
+        meshCol.convex = false;
+        meshCol.isTrigger = wasTrigger;
+        meshCol.sharedMaterial = material;
+        return true;
     }
 
 #if UNITY_EDITOR
+    private void OnValidate()
+    {
+        MigrateLegacyDifficultyTuning();
+        ClampTuning(ref easyTuning);
+        ClampTuning(ref normalTuning);
+        ClampTuning(ref hardTuning);
+        easyActivePillarCount = Mathf.Max(1, easyActivePillarCount);
+        hardCrystalRegrowSeconds = Mathf.Max(1f, hardCrystalRegrowSeconds);
+    }
+
+    private static void ClampTuning(ref DifficultyFightTuning tuning)
+    {
+        tuning.maxHp = Mathf.Max(1, tuning.maxHp);
+        tuning.roundSeconds = Mathf.Max(1f, tuning.roundSeconds);
+        tuning.fireballInterval = Mathf.Max(1f, tuning.fireballInterval);
+    }
+
     [ContextMenu("Setup Hit Colliders")]
     private void FitHitColliderMenu()
     {
@@ -2727,6 +3789,7 @@ public class DragonBoss : MonoBehaviour
         GameObject groundBowProp = null;
         GameObject groundQuiverProp = null;
         Transform heldQuiver = null;
+        DragonFightEquipStart.DifficultyQuiver[] difficultyOptions = null;
 
         if (bow != null)
         {
@@ -2741,28 +3804,60 @@ public class DragonBoss : MonoBehaviour
             groundBowProp.transform.SetParent(root.transform, true);
             StripPlayableBowComponents(groundBowProp);
 
-            GameObject quiverAnchorGo = new GameObject("GroundQuiverAnchor");
-            quiverAnchorGo.transform.SetPositionAndRotation(
-                bowAnchor.position + bowAnchor.right * 0.85f + Vector3.up * 0.05f,
-                bowAnchor.rotation);
-            quiverAnchorGo.transform.SetParent(root.transform, true);
-            quiverAnchor = quiverAnchorGo.transform;
+            difficultyOptions = new DragonFightEquipStart.DifficultyQuiver[3];
+            FightDifficulty[] diffs =
+            {
+                FightDifficulty.Easy,
+                FightDifficulty.Normal,
+                FightDifficulty.Hard
+            };
+            string[] names = { "GroundQuiver_Easy", "GroundQuiver_Normal", "GroundQuiver_Hard" };
+            Color[] colors =
+            {
+                new Color(0.45f, 0.85f, 0.45f, 1f),
+                new Color(0.85f, 0.75f, 0.35f, 1f),
+                new Color(0.9f, 0.35f, 0.35f, 1f)
+            };
 
-            GameObject groundQuiverGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            groundQuiverGo.name = "GroundQuiverVisual";
-            groundQuiverGo.transform.SetPositionAndRotation(quiverAnchor.position, quiverAnchor.rotation);
-            groundQuiverGo.transform.localScale = new Vector3(0.22f, 0.35f, 0.22f);
-            groundQuiverGo.transform.SetParent(root.transform, true);
-            groundQuiverProp = groundQuiverGo;
-            DestroyImmediate(groundQuiverGo.GetComponent<Collider>());
+            for (int i = 0; i < 3; i++)
+            {
+                float side = (i - 1) * 0.85f;
+                GameObject quiverAnchorGo = new GameObject(names[i] + "Anchor");
+                quiverAnchorGo.transform.SetPositionAndRotation(
+                    bowAnchor.position + bowAnchor.right * side + Vector3.up * 0.05f,
+                    bowAnchor.rotation);
+                quiverAnchorGo.transform.SetParent(root.transform, true);
 
-            GameObject heldQuiverGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-            heldQuiverGo.name = "HeldQuiverVisual";
-            heldQuiverGo.transform.localScale = new Vector3(0.22f, 0.35f, 0.22f);
-            heldQuiverGo.SetActive(false);
-            heldQuiverGo.transform.SetParent(root.transform, true);
-            heldQuiver = heldQuiverGo.transform;
-            DestroyImmediate(heldQuiverGo.GetComponent<Collider>());
+                GameObject groundQuiverGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                groundQuiverGo.name = names[i];
+                groundQuiverGo.transform.SetPositionAndRotation(
+                    quiverAnchorGo.transform.position,
+                    quiverAnchorGo.transform.rotation);
+                groundQuiverGo.transform.localScale = new Vector3(0.22f, 0.35f, 0.22f);
+                groundQuiverGo.transform.SetParent(root.transform, true);
+                DestroyImmediate(groundQuiverGo.GetComponent<Collider>());
+                MeshRenderer mr = groundQuiverGo.GetComponent<MeshRenderer>();
+                if (mr != null)
+                {
+                    mr.sharedMaterial = new Material(Shader.Find("Standard")) { color = colors[i] };
+                }
+
+                difficultyOptions[i] = new DragonFightEquipStart.DifficultyQuiver
+                {
+                    difficulty = diffs[i],
+                    groundVisual = groundQuiverGo,
+                    groundAnchor = quiverAnchorGo.transform
+                };
+
+                if (i == 1)
+                {
+                    quiverAnchor = quiverAnchorGo.transform;
+                    groundQuiverProp = groundQuiverGo;
+                }
+            }
+
+            // Prefer carrying the chosen ground mesh — no shared held visual.
+            heldQuiver = null;
         }
 
         equipStart = equip;
@@ -2779,11 +3874,31 @@ public class DragonBoss : MonoBehaviour
             quiverAnchor,
             fightUI,
             null);
+
+        if (difficultyOptions != null)
+        {
+            UnityEditor.SerializedObject so = new UnityEditor.SerializedObject(equip);
+            so.FindProperty("difficultyQuivers").arraySize = difficultyOptions.Length;
+            for (int i = 0; i < difficultyOptions.Length; i++)
+            {
+                UnityEditor.SerializedProperty entry =
+                    so.FindProperty("difficultyQuivers").GetArrayElementAtIndex(i);
+                entry.FindPropertyRelative("difficulty").enumValueIndex =
+                    (int)difficultyOptions[i].difficulty;
+                entry.FindPropertyRelative("groundVisual").objectReferenceValue =
+                    difficultyOptions[i].groundVisual;
+                entry.FindPropertyRelative("groundAnchor").objectReferenceValue =
+                    difficultyOptions[i].groundAnchor;
+            }
+
+            so.ApplyModifiedPropertiesWithoutUndo();
+        }
+
         UnityEditor.EditorUtility.SetDirty(equip);
         UnityEditor.EditorUtility.SetDirty(this);
         UnityEditor.Selection.activeGameObject = root;
         Debug.Log(
-            "Created DragonFightEquipStart with GroundBowVisual prop + disabled playable bow until pickup. "
+            "Created DragonFightEquipStart with Easy/Normal/Hard quivers. "
             + "Assign Instruction Signs on the component.",
             root);
 #endif
@@ -2818,99 +3933,6 @@ public class DragonBoss : MonoBehaviour
     /// <summary>
     /// Builds a simple stand-in dragon body + 4 pillar crystals around it for layout.
     /// </summary>
-    [ContextMenu("Fix Crystal Pillar Colliders (Capsule → Mesh)")]
-    public void FixCrystalPillarCollidersMenu()
-    {
-        int fixedCount = FixCrystalPillarColliders();
-        Debug.Log("DragonBoss: fixed " + fixedCount + " crystal pillar collider(s).", this);
-    }
-
-    /// <summary>
-    /// Unity cylinder primitives ship with CapsuleColliders (rounded ends). Swap to MeshCollider
-    /// so hitboxes match the flat-capped cylinder mesh.
-    /// </summary>
-    private int FixCrystalPillarColliders()
-    {
-        int fixedCount = 0;
-
-        for (int i = 0; i < crystals.Count; i++)
-        {
-            EnderCrystal crystal = crystals[i];
-            if (crystal == null)
-            {
-                continue;
-            }
-
-            Transform pillar = crystal.transform.parent;
-            if (pillar == null)
-            {
-                continue;
-            }
-
-            if (ReplaceCapsuleWithMeshCollider(pillar.gameObject))
-            {
-                fixedCount++;
-            }
-        }
-
-        // Also catch named pillars that may not be crystal parents yet.
-        for (int i = 1; i <= 8; i++)
-        {
-            GameObject pillar = GameObject.Find("CrystalPillar_" + i);
-            if (pillar == null)
-            {
-                continue;
-            }
-
-            if (ReplaceCapsuleWithMeshCollider(pillar))
-            {
-                fixedCount++;
-            }
-        }
-
-        return fixedCount;
-    }
-
-    private static bool ReplaceCapsuleWithMeshCollider(GameObject go)
-    {
-        if (go == null)
-        {
-            return false;
-        }
-
-        CapsuleCollider capsule = go.GetComponent<CapsuleCollider>();
-        if (capsule == null)
-        {
-            return false;
-        }
-
-        MeshFilter filter = go.GetComponent<MeshFilter>();
-        Mesh mesh = filter != null ? filter.sharedMesh : null;
-        if (mesh == null)
-        {
-            return false;
-        }
-
-        bool wasTrigger = capsule.isTrigger;
-        PhysicMaterial material = capsule.sharedMaterial;
-
-        // Immediate: avoid one frame with both CapsuleCollider + MeshCollider.
-        UnityEngine.Object.DestroyImmediate(capsule);
-
-        MeshCollider meshCol = go.GetComponent<MeshCollider>();
-        if (meshCol == null)
-        {
-            meshCol = go.AddComponent<MeshCollider>();
-        }
-
-        meshCol.sharedMesh = mesh;
-        // Static pillars: non-convex matches the true cylinder (flat caps).
-        meshCol.convex = false;
-        meshCol.isTrigger = wasTrigger;
-        meshCol.sharedMaterial = material;
-        return true;
-    }
-
     [ContextMenu("Create Placeholder Arena (Dragon + 4 Crystals)")]
     public void CreatePlaceholderArena()
     {

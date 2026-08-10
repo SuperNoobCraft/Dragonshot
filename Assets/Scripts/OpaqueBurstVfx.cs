@@ -84,9 +84,14 @@ public class OpaqueBurstVfx : MonoBehaviour
         vfx.Build();
     }
 
-    public static void SpawnCrystal(Vector3 worldPosition, Color energyColor)
+    public static void SpawnCrystal(Vector3 worldPosition, Color energyColor, float radius = -1f)
     {
         Settings s = Settings.CrystalDefault;
+        if (radius > 0f)
+        {
+            s.radius = radius;
+        }
+
         Color e = energyColor;
         e.a = 1f;
         s.coreColor = Color.Lerp(e, Color.white, 0.45f);

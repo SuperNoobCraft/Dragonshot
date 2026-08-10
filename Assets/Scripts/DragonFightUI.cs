@@ -33,20 +33,27 @@ public class DragonFightUI : MonoBehaviour
     [TextArea(2, 3)]
     [SerializeField] private string equipStep1PickUpBow = "Step 1\nPick up the bow\nwith your left hand.";
     [TextArea(2, 3)]
-    [SerializeField] private string equipStep2PickUpQuiver = "Step 2\nPick up the quiver\nwith your right hand.";
+    [SerializeField] private string equipStep2PickUpQuiver =
+        "Step 2\nPick a quiver (Easy / Normal / Hard).";
     [TextArea(2, 3)]
-    [SerializeField] private string equipStep3BehindBack = "Step 3\nReach behind your back\nto strap on the quiver.";
+    [SerializeField] private string equipStep3BehindBack =
+        "Step 3\nStrap the quiver on your back.\n(Optional: grab the scope now)\nClick here to reset.";
 
     [TextArea(2, 4)]
-    [Tooltip("{0} = seconds left, {1} = current HP, {2} = max HP")]
-    [SerializeField] private string playingTimerText = "TIME {0}\nHP {1}/{2}\n(click to reset)";
-    [TextArea(2, 3)]
-    [Tooltip("{0} = seconds left when the dragon was defeated")]
-    [SerializeField] private string victoryText = "VICTORY\n{0}s left\nRESET";
+    [Tooltip("{0} = seconds left, {1} = current HP, {2} = max HP, {3} = difficulty")]
+    [SerializeField] private string playingTimerText = "TIME {0}\nHP {1}/{2}\n{3}\n(click to reset)";
+    [TextArea(2, 4)]
+    [Tooltip("Shown when the dragon dies and the player never equipped the scope. {0}=seconds, {1}=difficulty")]
+    [SerializeField] private string victoryTextNoScope = "VICTORY\n{0}s left\nNo Scope\n{1}\nRESET";
+    [TextArea(2, 4)]
+    [Tooltip("Shown when the dragon dies and the player had the scope equipped. {0}=seconds, {1}=difficulty")]
+    [SerializeField] private string victoryTextWithScope = "VICTORY\n{0}s left\nWith Scope\n{1}\nRESET";
     [TextArea(2, 2)]
-    [SerializeField] private string timeoutText = "TIME UP\nRESET";
+    [Tooltip("{0} = difficulty")]
+    [SerializeField] private string timeoutText = "TIME UP\n{0}\nRESET";
     [TextArea(2, 2)]
-    [SerializeField] private string defeatText = "DEFEAT\nHit by fireball\nRESET";
+    [Tooltip("{0} = difficulty")]
+    [SerializeField] private string defeatText = "DEFEAT\nHit by fireball\n{0}\nRESET";
 
     [Header("Interact")]
     [SerializeField] private bool instructionOnlyBeforeFight = true;
@@ -59,6 +66,7 @@ public class DragonFightUI : MonoBehaviour
     private PanelState state = PanelState.Start;
     private bool wasTriggerHeld;
     private bool instructionOnly;
+    private bool allowResetDuringEquip;
 
     public void Assign(DragonBoss boss, TextMesh textMesh)
     {
@@ -101,7 +109,7 @@ public class DragonFightUI : MonoBehaviour
 
         if (PlayEnvironment.IsDesktopInput)
         {
-            if (instructionOnly && state == PanelState.Start)
+            if (instructionOnly && !allowResetDuringEquip && state == PanelState.Start)
             {
                 return;
             }
@@ -113,7 +121,7 @@ public class DragonFightUI : MonoBehaviour
         }
         else
         {
-            if (instructionOnly && state == PanelState.Start)
+            if (instructionOnly && !allowResetDuringEquip && state == PanelState.Start)
             {
                 wasTriggerHeld = IsTriggerHeld();
                 return;
@@ -132,6 +140,7 @@ public class DragonFightUI : MonoBehaviour
     public void ShowStart()
     {
         instructionOnly = false;
+        allowResetDuringEquip = false;
         state = PanelState.Start;
         SetText(startPanelText);
     }
@@ -139,6 +148,7 @@ public class DragonFightUI : MonoBehaviour
     public void ShowEquipInstructions(string text)
     {
         instructionOnly = instructionOnlyBeforeFight;
+        allowResetDuringEquip = false;
         state = PanelState.Start;
         SetText(text);
     }
@@ -146,6 +156,8 @@ public class DragonFightUI : MonoBehaviour
     public void ShowEquipStep(int step)
     {
         instructionOnly = instructionOnlyBeforeFight;
+        // After the bow is equipped, clicking the panel resets so you can re-pick a quiver.
+        allowResetDuringEquip = step >= 2;
         state = PanelState.Start;
         switch (step)
         {
@@ -156,6 +168,7 @@ public class DragonFightUI : MonoBehaviour
                 SetText(equipStep3BehindBack);
                 break;
             default:
+                allowResetDuringEquip = false;
                 SetText(equipStep1PickUpBow);
                 break;
         }
@@ -164,9 +177,10 @@ public class DragonFightUI : MonoBehaviour
     public void ShowTimer(float secondsRemaining, int hp, int maxHp)
     {
         instructionOnly = false;
+        allowResetDuringEquip = false;
         state = PanelState.Playing;
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsRemaining));
-        SetText(FormatTemplate(playingTimerText, whole, hp, maxHp));
+        SetText(FormatTemplate(playingTimerText, whole, hp, maxHp, DifficultyLabel()));
     }
 
     public void ShowTimer(float secondsRemaining)
@@ -174,23 +188,41 @@ public class DragonFightUI : MonoBehaviour
         ShowTimer(secondsRemaining, 0, 0);
     }
 
-    public void ShowVictory(float secondsLeft)
+    public void ShowVictory(float secondsLeft, bool usedScope = false)
     {
+        allowResetDuringEquip = false;
         state = PanelState.Victory;
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsLeft));
-        SetText(FormatTemplate(victoryText, whole));
+        string template = usedScope ? victoryTextWithScope : victoryTextNoScope;
+        SetText(FormatTemplate(template, whole, DifficultyLabel()));
     }
 
     public void ShowTimeout()
     {
+        allowResetDuringEquip = false;
         state = PanelState.Timeout;
-        SetText(timeoutText);
+        SetText(FormatTemplate(timeoutText, DifficultyLabel()));
     }
 
     public void ShowDefeat()
     {
+        allowResetDuringEquip = false;
         state = PanelState.Defeat;
-        SetText(defeatText);
+        SetText(FormatTemplate(defeatText, DifficultyLabel()));
+    }
+
+    private string DifficultyLabel()
+    {
+        FightDifficulty difficulty = dragon != null ? dragon.Difficulty : FightDifficulty.Normal;
+        switch (difficulty)
+        {
+            case FightDifficulty.Easy:
+                return "EASY";
+            case FightDifficulty.Hard:
+                return "HARD";
+            default:
+                return "NORMAL";
+        }
     }
 
     private static string FormatTemplate(string template, params object[] args)
@@ -219,6 +251,12 @@ public class DragonFightUI : MonoBehaviour
 
         if (state == PanelState.Start)
         {
+            if (allowResetDuringEquip)
+            {
+                dragon.ResetFight();
+                return;
+            }
+
             if (!instructionOnly)
             {
                 dragon.StartFight();

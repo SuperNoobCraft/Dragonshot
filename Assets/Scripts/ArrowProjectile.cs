@@ -88,6 +88,8 @@ public class ArrowProjectile : MonoBehaviour
     public Transform Rear => arrowRear;
     public bool IsInFlight => flying;
     public bool HasStuck => stuck;
+    public float GravityMultiplier => gravityMultiplier;
+    public float AirDrag => airDrag;
     public float ShaftLength
     {
         get
@@ -248,7 +250,40 @@ public class ArrowProjectile : MonoBehaviour
             }
         }
 
+        TryHitDragonPrecise(velocity);
         TryStickViaSweep(velocity);
+    }
+
+    /// <summary>
+    /// Triangle-accurate dragon hit (avoids PhysX convex hull filling gaps under wings).
+    /// </summary>
+    private void TryHitDragonPrecise(Vector3 velocity)
+    {
+        if (stuck || !flying || dragonHitHandled)
+        {
+            return;
+        }
+
+        float speed = velocity.magnitude;
+        if (speed < 0.15f)
+        {
+            return;
+        }
+
+        Vector3 direction = velocity / speed;
+        Vector3 tip = arrowTip != null ? arrowTip.position : body.position;
+        float castDistance = speed * Time.fixedDeltaTime + 0.08f;
+        Ray ray = new Ray(tip - direction * 0.02f, direction);
+        DragonBoss dragon = DragonBoss.Resolve();
+        if (dragon == null || !dragon.IsFightActive)
+        {
+            return;
+        }
+
+        if (dragon.RaycastBody(ray, castDistance, out _, out _))
+        {
+            dragon.HandleArrowCollision(this);
+        }
     }
 
     /// <summary>
@@ -295,10 +330,9 @@ public class ArrowProjectile : MonoBehaviour
             return;
         }
 
-        DragonBoss dragon = hit.collider.GetComponentInParent<DragonBoss>();
-        if (dragon != null)
+        // Dragon body is handled by TryHitDragonPrecise (triangle mesh) — ignore PhysX hulls.
+        if (hit.collider.GetComponentInParent<DragonBoss>() != null)
         {
-            // Let collision / relay deal damage; don't pin into the dragon mesh.
             return;
         }
 

@@ -38,17 +38,40 @@ public class EnderCrystal : MonoBehaviour
     [SerializeField] private float beamWidth = 0.08f;
     [SerializeField] private float beamScrollSpeed = 1.5f;
 
+    [Header("Hard Regrow")]
+    [Tooltip("Final seconds of hard-mode regrow when the inner orb grows. Beam returns only on full revive.")]
+    [SerializeField, Min(0.1f)] private float regenerateInnerOrbSeconds = 2f;
+    [Tooltip("Fight-start / shared emerge: fraction of the grow (0-1) used for the inner orb at the end.")]
+    [SerializeField, Range(0.05f, 0.5f)] private float emergeInnerOrbFraction = 0.15f;
+
+    private enum GrowMode
+    {
+        None,
+        HardRegrow,
+        RiseEmerge
+    }
+
     private LineRenderer beam;
     private bool destroyed;
+    private bool combatActive = true;
+    private GrowMode growMode = GrowMode.None;
+    private float regenerateElapsed;
+    private float regenerateDuration = 20f;
     private Material beamMaterial;
     private Transform visualRoot;
     private Transform innerSpin;
     private Transform outerSpin;
     private Vector3 visualBaseLocalPos;
+    private Vector3 innerSpinBaseScale = Vector3.one;
+    private Vector3 outerSpinBaseScale = Vector3.one;
     private float bobPhase;
     private readonly List<Material> ownedMaterials = new List<Material>(8);
 
-    public bool IsAlive => !destroyed;
+    public bool IsAlive => !destroyed && combatActive && growMode == GrowMode.None;
+    public bool IsCombatActive => combatActive;
+    public bool IsDestroyed => destroyed;
+    public bool IsRegenerating => growMode == GrowMode.HardRegrow;
+    public bool IsEmerging => growMode != GrowMode.None;
 
     public void Bind(DragonBoss owner)
     {
@@ -104,6 +127,18 @@ public class EnderCrystal : MonoBehaviour
 
     private void Update()
     {
+        if (growMode == GrowMode.HardRegrow)
+        {
+            TickHardRegrow();
+            return;
+        }
+
+        if (growMode == GrowMode.RiseEmerge)
+        {
+            TickEmergeSpin();
+            return;
+        }
+
         if (destroyed || visualRoot == null)
         {
             return;
@@ -125,23 +160,54 @@ public class EnderCrystal : MonoBehaviour
 
     private void LateUpdate()
     {
-        if (destroyed || beam == null)
+        if (beam == null)
         {
             return;
         }
 
-        bool showBeam = dragon == null || dragon.ShouldShowCrystalShieldVisual;
-        if (beam.enabled != showBeam)
+        // Beam = crystal is contributing to the shield. Never during grow/emerge.
+        if (growMode != GrowMode.None || destroyed)
         {
-            beam.enabled = showBeam;
+            if (beam.enabled)
+            {
+                beam.enabled = false;
+            }
+
+            return;
         }
 
-        if (!showBeam)
+        // Beam only from crystals that are actually alive and feeding the shield.
+        bool showAliveBeam = IsAlive && (dragon == null || dragon.ShouldShowCrystalShieldVisual);
+        if (beam.enabled != showAliveBeam)
+        {
+            beam.enabled = showAliveBeam;
+        }
+
+        if (!showAliveBeam)
         {
             return;
         }
 
-        Vector3 start = beamOrigin != null ? beamOrigin.position : transform.position;
+        UpdateBeamEndpoints();
+    }
+
+    private void UpdateBeamEndpoints()
+    {
+        // Follow the bobbing visual, not the fixed crystal root.
+        Vector3 start;
+        if (visualRoot != null)
+        {
+            start = visualRoot.position;
+        }
+        else if (beamOrigin != null)
+        {
+            start = beamOrigin.position;
+        }
+        else
+        {
+            start = transform.position;
+        }
+
         Vector3 end = dragon != null ? dragon.ShieldAttachPoint : start + Vector3.up * 2f;
 
         beam.positionCount = 2;
@@ -168,7 +234,7 @@ public class EnderCrystal : MonoBehaviour
 
     private void TryHit(Collider other)
     {
-        if (destroyed || other == null)
+        if (destroyed || other == null || !combatActive)
         {
             return;
         }
@@ -186,8 +252,14 @@ public class EnderCrystal : MonoBehaviour
 
         destroyed = true;
         Destroy(arrow.gameObject);
-        FightAudio.PlayCrystalExplode(transform.position);
-        OpaqueBurstVfx.SpawnCrystal(transform.position, innerColor);
+
+        Vector3 blastPos = visualRoot != null ? visualRoot.position : transform.position;
+        float blastRadius = dragon != null
+            ? dragon.CrystalExplosionRadius
+            : OpaqueBurstVfx.Settings.CrystalDefault.radius;
+
+        FightAudio.PlayCrystalExplode(blastPos);
+        OpaqueBurstVfx.SpawnCrystal(blastPos, innerColor, blastRadius);
 
         if (beam != null)
         {
@@ -197,14 +269,30 @@ public class EnderCrystal : MonoBehaviour
         if (dragon != null)
         {
             dragon.NotifyCrystalDestroyed(this);
+            dragon.TryDamageFromCrystalExplosion(blastPos);
         }
 
-        SetCrystalActiveVisual(false);
+        if (dragon != null && dragon.ShouldRegrowCrystals)
+        {
+            BeginRegrow(dragon.HardCrystalRegrowSeconds);
+        }
+        else
+        {
+            SetCrystalActiveVisual(false);
+        }
     }
 
     public void Revive()
     {
+        CancelGrow();
         destroyed = false;
+        combatActive = true;
+        ResetPartScales();
+        if (visualRoot != null)
+        {
+            visualRoot.localScale = Vector3.one * visualScale;
+        }
+
         SetCrystalActiveVisual(true);
 
         if (beam != null)
@@ -221,15 +309,347 @@ public class EnderCrystal : MonoBehaviour
         }
     }
 
-    private void SetCrystalActiveVisual(bool active)
+    public void CancelRegrow()
+    {
+        CancelGrow();
+    }
+
+    public void CancelGrow()
+    {
+        growMode = GrowMode.None;
+        regenerateElapsed = 0f;
+        ResetPartScales();
+        if (beam != null && (destroyed || !combatActive))
+        {
+            beam.enabled = false;
+        }
+    }
+
+    /// <summary>
+    /// Hard mode: cage shell grows first; in the last
+    /// <see cref="regenerateInnerOrbSeconds"/> the inner orb grows.
+    /// Beam returns only when the crystal fully revives (shield contribution).
+    /// </summary>
+    public void BeginRegrow(float duration)
+    {
+        growMode = GrowMode.HardRegrow;
+        regenerateElapsed = 0f;
+        regenerateDuration = Mathf.Max(regenerateInnerOrbSeconds + 0.1f, duration);
+        destroyed = true;
+        combatActive = false;
+
+        EnsureCrystalVisual();
+        CachePartBaseScales();
+
+        SetCrystalActiveVisual(true);
+        SetBeamVisible(false);
+        ApplyEmergeProgress(0f);
+
+        DisableHitColliders();
+    }
+
+    /// <summary>
+    /// Fight start: show the crystal growing with the pillar rise (progress driven externally).
+    /// </summary>
+    public void BeginRiseEmerge()
+    {
+        growMode = GrowMode.RiseEmerge;
+        destroyed = false;
+        combatActive = false;
+        regenerateElapsed = 0f;
+
+        EnsureCrystalVisual();
+        CachePartBaseScales();
+
+        SetCrystalActiveVisual(true);
+        SetBeamVisible(false);
+        ApplyEmergeProgress(0f);
+        DisableHitColliders();
+
+        if (dragon != null)
+        {
+            dragon.NotifyCrystalDestroyed(this);
+        }
+    }
+
+    /// <param name="progress01">0 at buried start, 1 at peak.</param>
+    public void SetRiseEmergeProgress(float progress01)
+    {
+        if (growMode != GrowMode.RiseEmerge)
+        {
+            return;
+        }
+
+        ApplyEmergeProgress(Mathf.Clamp01(progress01));
+    }
+
+    /// <summary>Finish fight-start emerge: full size, combat on, beam on, feeds shield.</summary>
+    public void CompleteRiseEmerge()
+    {
+        growMode = GrowMode.None;
+        destroyed = false;
+        combatActive = true;
+        ResetPartScales();
+        if (visualRoot != null)
+        {
+            visualRoot.localScale = Vector3.one * visualScale;
+        }
+
+        SetCrystalActiveVisual(true);
+        SetBeamVisible(true);
+        EnsureBeam();
+        ApplyBeamColor(beamColor);
+
+        if (dragon != null)
+        {
+            dragon.RegisterCrystal(this);
+        }
+    }
+
+    private void DisableHitColliders()
     {
         Collider[] cols = GetComponentsInChildren<Collider>(true);
         for (int i = 0; i < cols.Length; i++)
         {
             if (cols[i] != null)
             {
-                // Keep the root hit collider toggled with active; child visuals have no colliders.
-                cols[i].enabled = active;
+                cols[i].enabled = false;
+            }
+        }
+    }
+
+    private void TickHardRegrow()
+    {
+        regenerateElapsed += Time.deltaTime;
+        float t = Mathf.Clamp01(regenerateElapsed / regenerateDuration);
+        ApplyEmergeProgress(t);
+        TickEmergeSpin();
+
+        if (dragon != null && !dragon.ShouldRegrowCrystals)
+        {
+            CancelGrow();
+            SetCrystalActiveVisual(false);
+            SetBeamVisible(false);
+            return;
+        }
+
+        if (t < 1f)
+        {
+            return;
+        }
+
+        growMode = GrowMode.None;
+        Revive();
+    }
+
+    private void TickEmergeSpin()
+    {
+        bool innerPhase = IsInInnerEmergePhase();
+        if (outerSpin != null && outerSpin.gameObject.activeInHierarchy)
+        {
+            outerSpin.Rotate(outerSpinAxis.normalized, outerSpinSpeed * Time.deltaTime, Space.Self);
+        }
+
+        if (innerSpin != null && innerPhase && innerSpin.gameObject.activeInHierarchy)
+        {
+            innerSpin.Rotate(innerSpinAxis.normalized, innerSpinSpeed * Time.deltaTime, Space.Self);
+        }
+    }
+
+    private bool IsInInnerEmergePhase()
+    {
+        if (growMode == GrowMode.None)
+        {
+            return false;
+        }
+
+        float overall;
+        float innerFraction;
+        if (growMode == GrowMode.HardRegrow)
+        {
+            overall = Mathf.Clamp01(regenerateElapsed / regenerateDuration);
+            innerFraction = Mathf.Clamp(
+                regenerateInnerOrbSeconds / Mathf.Max(0.01f, regenerateDuration),
+                0.05f,
+                0.5f);
+        }
+        else
+        {
+            // Rise emerge stores latest overall in regenerateElapsed as 0-1 progress.
+            overall = Mathf.Clamp01(regenerateElapsed);
+            innerFraction = emergeInnerOrbFraction;
+        }
+
+        float shellEnd = Mathf.Max(0.01f, 1f - innerFraction);
+        return overall >= shellEnd;
+    }
+
+    private void ApplyEmergeProgress(float overall01)
+    {
+        overall01 = Mathf.Clamp01(overall01);
+        if (growMode == GrowMode.RiseEmerge)
+        {
+            regenerateElapsed = overall01;
+        }
+
+        float innerFraction = growMode == GrowMode.HardRegrow
+            ? Mathf.Clamp(
+                regenerateInnerOrbSeconds / Mathf.Max(0.01f, regenerateDuration),
+                0.05f,
+                0.5f)
+            : emergeInnerOrbFraction;
+
+        float shellEnd = Mathf.Max(0.01f, 1f - innerFraction);
+        float outerT = Mathf.Clamp01(overall01 / shellEnd);
+        float innerT = overall01 <= shellEnd
+            ? 0f
+            : Mathf.Clamp01((overall01 - shellEnd) / innerFraction);
+
+        if (visualRoot != null)
+        {
+            visualRoot.localScale = Vector3.one * visualScale;
+        }
+
+        if (outerSpin != null)
+        {
+            outerSpin.localScale = outerSpinBaseScale * outerT;
+            outerSpin.gameObject.SetActive(outerT > 0.001f);
+        }
+
+        if (innerSpin != null)
+        {
+            innerSpin.localScale = innerSpinBaseScale * innerT;
+            innerSpin.gameObject.SetActive(innerT > 0.001f);
+        }
+
+        SetBeamVisible(false);
+    }
+
+    private void CachePartBaseScales()
+    {
+        if (innerSpin != null)
+        {
+            if (innerSpin.localScale.sqrMagnitude > 0.25f)
+            {
+                innerSpinBaseScale = innerSpin.localScale;
+            }
+            else if (innerSpinBaseScale.sqrMagnitude < 0.01f)
+            {
+                innerSpinBaseScale = Vector3.one;
+            }
+        }
+
+        if (outerSpin != null)
+        {
+            if (outerSpin.localScale.sqrMagnitude > 0.25f)
+            {
+                outerSpinBaseScale = outerSpin.localScale;
+            }
+            else if (outerSpinBaseScale.sqrMagnitude < 0.01f)
+            {
+                outerSpinBaseScale = Vector3.one;
+            }
+        }
+    }
+
+    private void ResetPartScales()
+    {
+        if (innerSpin != null)
+        {
+            innerSpin.localScale = innerSpinBaseScale.sqrMagnitude > 0.0001f
+                ? innerSpinBaseScale
+                : Vector3.one;
+            innerSpin.gameObject.SetActive(true);
+        }
+
+        if (outerSpin != null)
+        {
+            outerSpin.localScale = outerSpinBaseScale.sqrMagnitude > 0.0001f
+                ? outerSpinBaseScale
+                : Vector3.one;
+            outerSpin.gameObject.SetActive(true);
+        }
+    }
+
+    private void SetBeamVisible(bool visible)
+    {
+        if (beam != null)
+        {
+            beam.enabled = visible;
+        }
+    }
+
+    /// <summary>Force the beam off (Easy-mode unused pillars, bury, etc.).</summary>
+    public void SuppressBeam()
+    {
+        SetBeamVisible(false);
+    }
+
+    /// <summary>
+    /// Pillar intro: hide / show crystal without counting as player destruction.
+    /// Inactive crystals do not feed the dragon shield.
+    /// </summary>
+    public void SetCombatActive(bool active)
+    {
+        if (destroyed && growMode != GrowMode.HardRegrow)
+        {
+            combatActive = false;
+            SetCrystalActiveVisual(false);
+            if (beam != null)
+            {
+                beam.enabled = false;
+            }
+
+            if (dragon != null)
+            {
+                dragon.NotifyCrystalDestroyed(this);
+            }
+
+            return;
+        }
+
+        if (!active)
+        {
+            CancelGrow();
+        }
+
+        bool wasAlive = IsAlive;
+        combatActive = active;
+        if (growMode == GrowMode.None)
+        {
+            SetCrystalActiveVisual(active && !destroyed);
+        }
+
+        if (beam != null)
+        {
+            beam.enabled = active && !destroyed && growMode == GrowMode.None;
+        }
+
+        if (dragon == null)
+        {
+            return;
+        }
+
+        bool nowAlive = IsAlive;
+        if (nowAlive && !wasAlive)
+        {
+            dragon.RegisterCrystal(this);
+        }
+        else if (!nowAlive && wasAlive)
+        {
+            dragon.NotifyCrystalDestroyed(this);
+        }
+    }
+
+    private void SetCrystalActiveVisual(bool active)
+    {
+        bool enableCols = active && growMode == GrowMode.None && !destroyed;
+        Collider[] cols = GetComponentsInChildren<Collider>(true);
+        for (int i = 0; i < cols.Length; i++)
+        {
+            if (cols[i] != null)
+            {
+                cols[i].enabled = enableCols;
             }
         }
 
@@ -253,7 +673,7 @@ public class EnderCrystal : MonoBehaviour
 
             if (beam != null && renderers[i] == beam)
             {
-                renderers[i].enabled = active;
+                renderers[i].enabled = active && !destroyed && growMode == GrowMode.None;
                 continue;
             }
 
@@ -295,6 +715,11 @@ public class EnderCrystal : MonoBehaviour
             innerSpin = existing.Find("InnerSpin");
             outerSpin = existing.Find("OuterSpin");
             visualBaseLocalPos = visualRoot.localPosition;
+            if (growMode == GrowMode.None)
+            {
+                CachePartBaseScales();
+            }
+
             HideLegacyPlaceholders();
             return;
         }
@@ -420,6 +845,9 @@ public class EnderCrystal : MonoBehaviour
             studRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             studRenderer.receiveShadows = false;
         }
+
+        innerSpinBaseScale = Vector3.one;
+        outerSpinBaseScale = Vector3.one;
     }
 
     private static void DestroyCollider(GameObject go)
