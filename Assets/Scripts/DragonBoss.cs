@@ -722,6 +722,7 @@ public class DragonBoss : MonoBehaviour
         CacheFlightMarkers();
         ClearFireballs();
         nextFireballTime = Time.time + fireballFirstDelay;
+        HideCreditsSigns();
 
         transform.position = spawnPosition;
         transform.rotation = spawnRotation;
@@ -813,6 +814,7 @@ public class DragonBoss : MonoBehaviour
             }
         }
 
+        HideCreditsSigns();
         RefreshShieldState();
         RestoreBodyVisuals();
 
@@ -912,6 +914,7 @@ public class DragonBoss : MonoBehaviour
         ClearFireballs();
         FightAudio.SetDragonFlying(false);
 
+        HideCreditsSigns();
         if (fightUI != null)
         {
             fightUI.ShowDefeat(cause);
@@ -1393,6 +1396,8 @@ public class DragonBoss : MonoBehaviour
 
             fightUI.ShowVictory(timeRemaining, usedScope);
         }
+
+        ShowCreditsSigns();
     }
 
     private Vector3 ResolveDeathBlastPosition()
@@ -1403,6 +1408,32 @@ public class DragonBoss : MonoBehaviour
         }
 
         return ShieldAttachPoint;
+    }
+
+    private void ShowCreditsSigns()
+    {
+        if (equipStart == null && useEquipStart)
+        {
+            equipStart = FindObjectOfType<DragonFightEquipStart>();
+        }
+
+        if (equipStart != null)
+        {
+            equipStart.ShowCreditsSigns();
+        }
+    }
+
+    private void HideCreditsSigns()
+    {
+        if (equipStart == null && useEquipStart)
+        {
+            equipStart = FindObjectOfType<DragonFightEquipStart>();
+        }
+
+        if (equipStart != null)
+        {
+            equipStart.HideCreditsSigns();
+        }
     }
 
     private struct DeathRay

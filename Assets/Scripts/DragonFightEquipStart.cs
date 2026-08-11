@@ -65,6 +65,8 @@ public class DragonFightEquipStart : MonoBehaviour
     [SerializeField, Min(0.25f)] private float instructionSignBuryDepth = 3.5f;
     [SerializeField, Min(0.1f)] private float instructionSignRiseSpeed = 3.5f;
     [SerializeField, Min(0.1f)] private float instructionSignRetreatSpeed = 4.5f;
+    [Tooltip("Same style as instruction signs. Starts buried; rises after victory (dragon exploded); sinks on reset. Not shown on defeat.")]
+    [SerializeField] private GameObject[] creditsSigns;
     [Tooltip("Optional. Used only to sync the equipped scope mesh on the playable bow.")]
     [SerializeField] private ScopePickup[] scopePickups;
 
@@ -154,6 +156,7 @@ public class DragonFightEquipStart : MonoBehaviour
     private QuiverPoseCache[] quiverPoseCache = System.Array.Empty<QuiverPoseCache>();
     private LabelPoseCache[] labelPoseCache = System.Array.Empty<LabelPoseCache>();
     private InstructionSignSlot[] instructionSignSlots = System.Array.Empty<InstructionSignSlot>();
+    private InstructionSignSlot[] creditsSignSlots = System.Array.Empty<InstructionSignSlot>();
     private float[] quiverSpinAngles = System.Array.Empty<float>();
     private float[] bowSpinAngles = System.Array.Empty<float>();
     private bool groundPosesCached;
@@ -207,6 +210,8 @@ public class DragonFightEquipStart : MonoBehaviour
         EnsureGroundBowsMigrated();
         CacheGroundPosesIfNeeded();
         CacheInstructionSignPoses();
+        CacheCreditsSignPoses();
+        SnapCreditsSignsBuried();
     }
 
     private void Start()
@@ -223,6 +228,7 @@ public class DragonFightEquipStart : MonoBehaviour
 
         UpdateIdlePropSpin();
         UpdateInstructionSigns();
+        UpdateCreditsSigns();
 
         if (dragon == null || bow == null || phase == EquipPhase.Complete)
         {
@@ -366,7 +372,20 @@ public class DragonFightEquipStart : MonoBehaviour
         }
 
         SetInstructionSignsVisible(true);
+        SetCreditsSignsVisible(false);
         RefreshInstructionsIfNeeded();
+    }
+
+    /// <summary>Rise credits signs after victory (dragon exploded).</summary>
+    public void ShowCreditsSigns()
+    {
+        SetCreditsSignsVisible(true);
+    }
+
+    /// <summary>Sink credits signs (reset / defeat / fight start).</summary>
+    public void HideCreditsSigns()
+    {
+        SetCreditsSignsVisible(false);
     }
 
     private void UpdatePickupDwell()
@@ -2044,6 +2063,200 @@ public class DragonFightEquipStart : MonoBehaviour
                 }
 
                 instructionSignSlots[i] = slot;
+            }
+        }
+    }
+
+    private void SetCreditsSignsVisible(bool visible)
+    {
+        CacheCreditsSignPoses();
+        if (visible)
+        {
+            BeginRaiseCreditsSigns();
+        }
+        else
+        {
+            BeginSinkCreditsSigns();
+        }
+    }
+
+    private void SnapCreditsSignsBuried()
+    {
+        CacheCreditsSignPoses();
+        for (int i = 0; i < creditsSignSlots.Length; i++)
+        {
+            InstructionSignSlot slot = creditsSignSlots[i];
+            if (!slot.cached || slot.transform == null)
+            {
+                continue;
+            }
+
+            if (!slot.transform.gameObject.activeSelf)
+            {
+                slot.transform.gameObject.SetActive(true);
+            }
+
+            Vector3 p = slot.restPosition;
+            p.y = slot.restPosition.y - Mathf.Abs(instructionSignBuryDepth);
+            slot.transform.position = p;
+            slot.buriedY = p.y;
+            slot.motion = SignMotion.Buried;
+            creditsSignSlots[i] = slot;
+        }
+    }
+
+    private void CacheCreditsSignPoses()
+    {
+        int count = creditsSigns != null ? creditsSigns.Length : 0;
+        if (creditsSignSlots == null || creditsSignSlots.Length != count)
+        {
+            creditsSignSlots = new InstructionSignSlot[count];
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            GameObject sign = creditsSigns[i];
+            if (sign == null)
+            {
+                creditsSignSlots[i] = default;
+                continue;
+            }
+
+            InstructionSignSlot slot = creditsSignSlots[i];
+            if (slot.cached && slot.transform == sign.transform)
+            {
+                slot.buriedY = slot.restPosition.y - Mathf.Abs(instructionSignBuryDepth);
+                creditsSignSlots[i] = slot;
+                continue;
+            }
+
+            Transform t = sign.transform;
+            Vector3 rest = t.position;
+            creditsSignSlots[i] = new InstructionSignSlot
+            {
+                transform = t,
+                restPosition = rest,
+                buriedY = rest.y - Mathf.Abs(instructionSignBuryDepth),
+                motion = SignMotion.Raised,
+                cached = true
+            };
+        }
+    }
+
+    private void BeginRaiseCreditsSigns()
+    {
+        CacheCreditsSignPoses();
+        for (int i = 0; i < creditsSignSlots.Length; i++)
+        {
+            InstructionSignSlot slot = creditsSignSlots[i];
+            if (!slot.cached || slot.transform == null)
+            {
+                continue;
+            }
+
+            if (!slot.transform.gameObject.activeSelf)
+            {
+                slot.transform.gameObject.SetActive(true);
+            }
+
+            if (Mathf.Abs(slot.transform.position.y - slot.restPosition.y) <= 0.02f
+                && slot.motion != SignMotion.Retreating)
+            {
+                slot.transform.position = slot.restPosition;
+                slot.motion = SignMotion.Raised;
+            }
+            else
+            {
+                slot.motion = SignMotion.Rising;
+            }
+
+            creditsSignSlots[i] = slot;
+        }
+    }
+
+    private void BeginSinkCreditsSigns()
+    {
+        CacheCreditsSignPoses();
+        for (int i = 0; i < creditsSignSlots.Length; i++)
+        {
+            InstructionSignSlot slot = creditsSignSlots[i];
+            if (!slot.cached || slot.transform == null)
+            {
+                continue;
+            }
+
+            if (!slot.transform.gameObject.activeSelf)
+            {
+                slot.transform.gameObject.SetActive(true);
+            }
+
+            slot.buriedY = slot.restPosition.y - Mathf.Abs(instructionSignBuryDepth);
+            if (Mathf.Abs(slot.transform.position.y - slot.buriedY) <= 0.02f)
+            {
+                Vector3 p = slot.transform.position;
+                p.y = slot.buriedY;
+                slot.transform.position = p;
+                slot.motion = SignMotion.Buried;
+            }
+            else
+            {
+                slot.motion = SignMotion.Retreating;
+            }
+
+            creditsSignSlots[i] = slot;
+        }
+    }
+
+    private void UpdateCreditsSigns()
+    {
+        if (creditsSignSlots == null || creditsSignSlots.Length == 0)
+        {
+            return;
+        }
+
+        float dt = Time.deltaTime;
+        for (int i = 0; i < creditsSignSlots.Length; i++)
+        {
+            InstructionSignSlot slot = creditsSignSlots[i];
+            if (!slot.cached || slot.transform == null)
+            {
+                continue;
+            }
+
+            if (slot.motion == SignMotion.Rising)
+            {
+                Vector3 p = slot.transform.position;
+                float nextY = Mathf.MoveTowards(p.y, slot.restPosition.y, instructionSignRiseSpeed * dt);
+                p.x = slot.restPosition.x;
+                p.z = slot.restPosition.z;
+                p.y = nextY;
+                slot.transform.position = p;
+                if (Mathf.Abs(nextY - slot.restPosition.y) <= 0.01f)
+                {
+                    p.y = slot.restPosition.y;
+                    slot.transform.position = p;
+                    slot.motion = SignMotion.Raised;
+                }
+
+                creditsSignSlots[i] = slot;
+            }
+            else if (slot.motion == SignMotion.Retreating)
+            {
+                Vector3 p = slot.transform.position;
+                float buriedY = slot.restPosition.y - Mathf.Abs(instructionSignBuryDepth);
+                float nextY = Mathf.MoveTowards(p.y, buriedY, instructionSignRetreatSpeed * dt);
+                p.x = slot.restPosition.x;
+                p.z = slot.restPosition.z;
+                p.y = nextY;
+                slot.transform.position = p;
+                if (Mathf.Abs(nextY - buriedY) <= 0.01f)
+                {
+                    p.y = buriedY;
+                    slot.transform.position = p;
+                    slot.motion = SignMotion.Buried;
+                }
+
+                creditsSignSlots[i] = slot;
             }
         }
     }

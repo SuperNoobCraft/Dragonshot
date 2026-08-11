@@ -62,6 +62,7 @@ public class EnderCrystal : MonoBehaviour
     private Transform innerSpin;
     private Transform outerSpin;
     private Vector3 visualBaseLocalPos;
+    private bool hasCachedVisualBaseLocalPos;
     private Vector3 innerSpinBaseScale = Vector3.one;
     private Vector3 outerSpinBaseScale = Vector3.one;
     private float bobPhase;
@@ -747,7 +748,16 @@ public class EnderCrystal : MonoBehaviour
             crystalVisual = existing.gameObject;
             innerSpin = existing.Find("InnerSpin");
             outerSpin = existing.Find("OuterSpin");
-            visualBaseLocalPos = visualRoot.localPosition;
+            // IMPORTANT:
+            // `visualRoot.localPosition` is continuously updated during idle bobbing.
+            // Re-caching it during regrow/emerge would "bake in" the current bob offset
+            // and cause crystals to drift more each reset/revive.
+            // So, cache the base local position once (from the initial rest placement).
+            if (!hasCachedVisualBaseLocalPos)
+            {
+                visualBaseLocalPos = visualRoot.localPosition;
+                hasCachedVisualBaseLocalPos = true;
+            }
             if (growMode == GrowMode.None)
             {
                 CachePartBaseScales();
@@ -797,6 +807,7 @@ public class EnderCrystal : MonoBehaviour
         root.transform.localScale = Vector3.one * visualScale;
         visualRoot = root.transform;
         visualBaseLocalPos = visualRoot.localPosition;
+        hasCachedVisualBaseLocalPos = true;
         crystalVisual = root;
 
         Mesh dodeca = CrystalGeometry.CreateDodecahedronMesh();
@@ -1137,6 +1148,7 @@ public class EnderCrystal : MonoBehaviour
 
         visualRoot = null;
         crystalVisual = null;
+        hasCachedVisualBaseLocalPos = false;
         BuildCageVisual();
         UnityEditor.EditorUtility.SetDirty(this);
         Debug.Log("EnderCrystal: rebuilt cage visual.", this);
