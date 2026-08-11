@@ -2,9 +2,10 @@ using UnityEngine;
 
 /// <summary>
 /// World pickup that unlocks the bow's green dotted shot-trajectory preview while aiming.
-/// Ground scope appears only after the bow is equipped; pick up with the bow hand (Hand2 /
-/// LeftHandChild). Scene-assigned equipped visuals keep their local pose; this script only
-/// toggles active state.
+/// During DragonFightEquipStart, scope is chosen with the ground bow (no floating scope pickup).
+/// Outside that flow, ground scope can appear after the bow is equipped; pick up with the bow
+/// hand (Hand2 / LeftHandChild). Scene-assigned equipped visuals keep their local pose; this
+/// script only toggles active state.
 /// </summary>
 public class ScopePickup : MonoBehaviour
 {
@@ -157,6 +158,25 @@ public class ScopePickup : MonoBehaviour
         groundAvailable = false;
         dwell = 0f;
         SetGroundVisible(false);
+    }
+
+    /// <summary>
+    /// Equip/unequip scope mesh from the bow-choice step (no ground pickup).
+    /// </summary>
+    public void ApplyEquippedFromBowChoice(bool equipped)
+    {
+        ResolveRefs();
+        pickedUp = equipped;
+        groundAvailable = false;
+        dwell = 0f;
+        SetGroundVisible(false);
+
+        if (bow != null)
+        {
+            bow.SetScopeEquipped(equipped);
+        }
+
+        SetEquippedVisualActive(equipped);
     }
 
     /// <summary>Fight reset: clear equip, hide everything until the bow is picked up again.</summary>
@@ -417,7 +437,7 @@ public class ScopePickup : MonoBehaviour
     /// <summary>Used by BowController when the playable bow leaves the ground.</summary>
     public static void NotifyBowEquipped()
     {
-        // Equip tutorial shows the scope after quiver choice, not at bow pickup.
+        // Equip tutorial chooses scope with the bow; do not show a ground scope pickup.
 #if UNITY_2023_1_OR_NEWER
         DragonFightEquipStart equip = FindFirstObjectByType<DragonFightEquipStart>();
 #else

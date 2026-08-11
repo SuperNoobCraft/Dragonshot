@@ -37,8 +37,8 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private float shieldPulseAmount = 0.012f;
 
     [Header("Hit Feedback")]
-    [Tooltip("Destroy the arrow when it hits the shield (blocked).")]
-    [SerializeField] private bool consumeArrowOnShieldHit = true;
+    [Tooltip("Fraction of speed kept when an arrow bounces off the crystal shield (0–1).")]
+    [SerializeField, Range(0.15f, 1f)] private float shieldBounceSpeedRetain = 0.7f;
     [SerializeField] private bool logStateChanges = true;
 
     [Header("Fight")]
@@ -1172,11 +1172,19 @@ public class DragonBoss : MonoBehaviour
         if (IsShielded)
         {
             FightAudio.PlayShieldBounce(arrow.transform.position);
-            if (consumeArrowOnShieldHit)
+            Vector3 hitPoint = arrow.Tip != null ? arrow.Tip.position : arrow.transform.position;
+            Vector3 outward = hitPoint - ShieldAttachPoint;
+            if (outward.sqrMagnitude < 1e-4f)
             {
-                Destroy(arrow.gameObject);
+                outward = hitPoint - transform.position;
             }
 
+            if (outward.sqrMagnitude < 1e-4f)
+            {
+                outward = -arrow.TipWorldDirection;
+            }
+
+            arrow.BounceOffSurface(hitPoint, outward.normalized, shieldBounceSpeedRetain);
             return true;
         }
 
@@ -1331,6 +1339,7 @@ public class DragonBoss : MonoBehaviour
         blast.duration = Mathf.Max(0.8f, blast.duration);
         blast.radius = Mathf.Max(blast.radius, deathRayLength * 0.65f);
         OpaqueBurstVfx.Spawn(blastPos, blast);
+        FightAudio.PlayCrystalExplode(blastPos);
 
         if (rayRoot != null)
         {
@@ -4202,8 +4211,11 @@ public class DragonBoss : MonoBehaviour
         if (existing != null)
         {
             equipStart = existing;
+            existing.EnsureDualGroundBowsWithLabels();
             UnityEditor.Selection.activeGameObject = existing.gameObject;
-            Debug.Log("DragonFightEquipStart already exists — selected it.", existing);
+            Debug.Log(
+                "DragonFightEquipStart already exists — ensured dual bows + labels.",
+                existing);
             return;
         }
 
@@ -4217,19 +4229,60 @@ public class DragonBoss : MonoBehaviour
         GameObject groundQuiverProp = null;
         Transform heldQuiver = null;
         DragonFightEquipStart.DifficultyQuiver[] difficultyOptions = null;
+        DragonFightEquipStart.GroundBowChoice[] bowOptions = null;
 
         if (bow != null)
         {
-            GameObject bowAnchorGo = new GameObject("GroundBowAnchor");
-            bowAnchorGo.transform.SetPositionAndRotation(bow.transform.position, bow.transform.rotation);
-            bowAnchorGo.transform.SetParent(root.transform, true);
-            bowAnchor = bowAnchorGo.transform;
+            Vector3 center = bow.transform.position;
+            Quaternion bowRot = bow.transform.rotation;
+            Vector3 right = bow.transform.right;
 
-            groundBowProp = UnityEngine.Object.Instantiate(bow.gameObject);
-            groundBowProp.name = "GroundBowVisual";
-            groundBowProp.transform.SetPositionAndRotation(bowAnchor.position, bowAnchor.rotation);
-            groundBowProp.transform.SetParent(root.transform, true);
-            StripPlayableBowComponents(groundBowProp);
+            bowOptions = new DragonFightEquipStart.GroundBowChoice[2];
+            bool[] scoped = { false, true };
+            string[] bowNames = { "GroundBow_NoScope", "GroundBow_WithScope" };
+            string[] bowLabelTexts = { "No Scope", "With Scope" };
+
+            for (int i = 0; i < 2; i++)
+            {
+                float side = (i == 0) ? -0.55f : 0.55f;
+                GameObject bowAnchorGo = new GameObject(bowNames[i] + "Anchor");
+                bowAnchorGo.transform.SetPositionAndRotation(
+                    center + right * side,
+                    bowRot);
+                bowAnchorGo.transform.SetParent(root.transform, true);
+
+                GameObject groundBowGo = UnityEngine.Object.Instantiate(bow.gameObject);
+                groundBowGo.name = bowNames[i];
+                groundBowGo.transform.SetPositionAndRotation(
+                    bowAnchorGo.transform.position,
+                    bowAnchorGo.transform.rotation);
+                groundBowGo.transform.SetParent(root.transform, true);
+                StripPlayableBowComponents(groundBowGo);
+                if (scoped[i])
+                {
+                    AttachGroundScopeIndicator(groundBowGo.transform);
+                }
+
+                GameObject bowLabel = CreateWorldTextLabel(
+                    bowLabelTexts[i],
+                    bowAnchorGo.transform.position + Vector3.up * 0.55f,
+                    root.transform,
+                    bowNames[i] + "Label");
+
+                bowOptions[i] = new DragonFightEquipStart.GroundBowChoice
+                {
+                    withScope = scoped[i],
+                    groundVisual = groundBowGo,
+                    groundAnchor = bowAnchorGo.transform,
+                    label = bowLabel
+                };
+
+                if (i == 0)
+                {
+                    bowAnchor = bowAnchorGo.transform;
+                    groundBowProp = groundBowGo;
+                }
+            }
 
             difficultyOptions = new DragonFightEquipStart.DifficultyQuiver[3];
             FightDifficulty[] diffs =
@@ -4239,6 +4292,7 @@ public class DragonBoss : MonoBehaviour
                 FightDifficulty.Hard
             };
             string[] names = { "GroundQuiver_Easy", "GroundQuiver_Normal", "GroundQuiver_Hard" };
+            string[] quiverLabelTexts = { "Easy", "Normal", "Hard" };
             Color[] colors =
             {
                 new Color(0.45f, 0.85f, 0.45f, 1f),
@@ -4251,8 +4305,8 @@ public class DragonBoss : MonoBehaviour
                 float side = (i - 1) * 0.85f;
                 GameObject quiverAnchorGo = new GameObject(names[i] + "Anchor");
                 quiverAnchorGo.transform.SetPositionAndRotation(
-                    bowAnchor.position + bowAnchor.right * side + Vector3.up * 0.05f,
-                    bowAnchor.rotation);
+                    center + right * side + Vector3.forward * 0.9f + Vector3.up * 0.05f,
+                    bowRot);
                 quiverAnchorGo.transform.SetParent(root.transform, true);
 
                 GameObject groundQuiverGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
@@ -4269,11 +4323,18 @@ public class DragonBoss : MonoBehaviour
                     mr.sharedMaterial = new Material(Shader.Find("Standard")) { color = colors[i] };
                 }
 
+                GameObject quiverLabel = CreateWorldTextLabel(
+                    quiverLabelTexts[i],
+                    quiverAnchorGo.transform.position + Vector3.up * 0.55f,
+                    root.transform,
+                    names[i] + "Label");
+
                 difficultyOptions[i] = new DragonFightEquipStart.DifficultyQuiver
                 {
                     difficulty = diffs[i],
                     groundVisual = groundQuiverGo,
-                    groundAnchor = quiverAnchorGo.transform
+                    groundAnchor = quiverAnchorGo.transform,
+                    label = quiverLabel
                 };
 
                 if (i == 1)
@@ -4302,9 +4363,25 @@ public class DragonBoss : MonoBehaviour
             fightUI,
             null);
 
+        UnityEditor.SerializedObject so = new UnityEditor.SerializedObject(equip);
+        if (bowOptions != null)
+        {
+            so.FindProperty("groundBows").arraySize = bowOptions.Length;
+            for (int i = 0; i < bowOptions.Length; i++)
+            {
+                UnityEditor.SerializedProperty entry =
+                    so.FindProperty("groundBows").GetArrayElementAtIndex(i);
+                entry.FindPropertyRelative("withScope").boolValue = bowOptions[i].withScope;
+                entry.FindPropertyRelative("groundVisual").objectReferenceValue =
+                    bowOptions[i].groundVisual;
+                entry.FindPropertyRelative("groundAnchor").objectReferenceValue =
+                    bowOptions[i].groundAnchor;
+                entry.FindPropertyRelative("label").objectReferenceValue = bowOptions[i].label;
+            }
+        }
+
         if (difficultyOptions != null)
         {
-            UnityEditor.SerializedObject so = new UnityEditor.SerializedObject(equip);
             so.FindProperty("difficultyQuivers").arraySize = difficultyOptions.Length;
             for (int i = 0; i < difficultyOptions.Length; i++)
             {
@@ -4316,20 +4393,89 @@ public class DragonBoss : MonoBehaviour
                     difficultyOptions[i].groundVisual;
                 entry.FindPropertyRelative("groundAnchor").objectReferenceValue =
                     difficultyOptions[i].groundAnchor;
+                entry.FindPropertyRelative("label").objectReferenceValue =
+                    difficultyOptions[i].label;
             }
-
-            so.ApplyModifiedPropertiesWithoutUndo();
         }
+
+        so.ApplyModifiedPropertiesWithoutUndo();
 
         UnityEditor.EditorUtility.SetDirty(equip);
         UnityEditor.EditorUtility.SetDirty(this);
         UnityEditor.Selection.activeGameObject = root;
         Debug.Log(
-            "Created DragonFightEquipStart with Easy/Normal/Hard quivers. "
+            "Created DragonFightEquipStart with No Scope / With Scope bows and Easy/Normal/Hard quivers. "
             + "Assign Instruction Signs on the component.",
             root);
 #endif
     }
+
+#if UNITY_EDITOR
+    private static GameObject CreateWorldTextLabel(
+        string text,
+        Vector3 worldPosition,
+        Transform parent,
+        string objectName)
+    {
+        GameObject labelGo = new GameObject(objectName);
+        labelGo.transform.SetParent(parent, true);
+        labelGo.transform.position = worldPosition;
+        labelGo.transform.rotation = Quaternion.identity;
+
+        TextMesh textMesh = labelGo.AddComponent<TextMesh>();
+        textMesh.text = text;
+        textMesh.anchor = TextAnchor.MiddleCenter;
+        textMesh.alignment = TextAlignment.Center;
+        textMesh.characterSize = 0.06f;
+        textMesh.fontSize = 48;
+        textMesh.color = Color.white;
+        return labelGo;
+    }
+
+    private static void AttachGroundScopeIndicator(Transform bowRoot)
+    {
+        if (bowRoot == null)
+        {
+            return;
+        }
+
+        ScopePickup scope = FindObjectOfType<ScopePickup>();
+        GameObject equipped = null;
+        if (scope != null)
+        {
+            UnityEditor.SerializedObject so = new UnityEditor.SerializedObject(scope);
+            UnityEditor.SerializedProperty prop = so.FindProperty("equippedVisual");
+            if (prop != null)
+            {
+                equipped = prop.objectReferenceValue as GameObject;
+            }
+        }
+
+        if (equipped != null)
+        {
+            GameObject clone = UnityEngine.Object.Instantiate(equipped, bowRoot);
+            clone.name = "GroundScopeVisual";
+            clone.SetActive(true);
+            return;
+        }
+
+        GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        marker.name = "GroundScopeVisual";
+        marker.transform.SetParent(bowRoot, false);
+        marker.transform.localPosition = new Vector3(0f, 0.12f, 0.05f);
+        marker.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        marker.transform.localScale = new Vector3(0.04f, 0.12f, 0.04f);
+        DestroyImmediate(marker.GetComponent<Collider>());
+        MeshRenderer mr = marker.GetComponent<MeshRenderer>();
+        if (mr != null)
+        {
+            mr.sharedMaterial = new Material(Shader.Find("Standard"))
+            {
+                color = new Color(0.25f, 0.85f, 0.35f, 1f)
+            };
+        }
+    }
+#endif
 
 #if UNITY_EDITOR
     private static void StripPlayableBowComponents(GameObject go)

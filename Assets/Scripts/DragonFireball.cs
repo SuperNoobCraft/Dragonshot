@@ -261,6 +261,18 @@ public class DragonFireball : MonoBehaviour
 
     private const float ArrowSaveRadiusPad = 0.75f;
 
+    /// <summary>
+    /// Visual motion scale vs default travel speed (3.2). Slow fireballs spin/pulse less frantically.
+    /// </summary>
+    private float AnimMotionScale
+    {
+        get
+        {
+            float reference = Mathf.Max(0.5f, DragonFireballSettings.Default.speed);
+            return Mathf.Clamp(settings.speed / reference, 0.25f, 2.5f);
+        }
+    }
+
     public static DragonFireball Spawn(
         Vector3 worldPosition,
         Vector3 direction,
@@ -426,16 +438,17 @@ public class DragonFireball : MonoBehaviour
 
     private void PulseCore()
     {
+        float anim = AnimMotionScale;
         if (coreRoot != null)
         {
-            float pulse = 1f + 0.12f * Mathf.Sin(Time.time * 16f);
-            float breathe = 1f + 0.06f * Mathf.Sin(Time.time * 7f + 1.3f);
+            float pulse = 1f + 0.12f * Mathf.Sin(Time.time * 16f * anim);
+            float breathe = 1f + 0.06f * Mathf.Sin(Time.time * 7f * anim + 1.3f);
             coreRoot.localScale = Vector3.one * (pulse * breathe);
         }
 
         if (coronaSpinRoot != null)
         {
-            spinAngle += settings.coronaSpinSpeed * Time.deltaTime;
+            spinAngle += settings.coronaSpinSpeed * anim * Time.deltaTime;
             coronaSpinRoot.localRotation = Quaternion.Euler(0f, 0f, spinAngle);
         }
     }
@@ -681,11 +694,15 @@ public class DragonFireball : MonoBehaviour
     private void ConfigureHeadOnSparks(ParticleSystem ps, float corona)
     {
         float size = Mathf.Max(0.15f, settings.size);
+        float anim = AnimMotionScale;
         var main = ps.main;
         main.loop = true;
         main.playOnAwake = true;
-        main.startLifetime = settings.emberLifetime;
-        main.startSpeed = new ParticleSystem.MinMaxCurve(size * 0.55f, size * 1.4f);
+        // Longer-lived, slower sparks when the ball itself is slow.
+        main.startLifetime = Mathf.Max(0.05f, settings.emberLifetime / Mathf.Max(0.25f, anim));
+        main.startSpeed = new ParticleSystem.MinMaxCurve(
+            size * 0.55f * anim,
+            size * 1.4f * anim);
         main.startSize = new ParticleSystem.MinMaxCurve(size * 0.07f, size * 0.16f);
         main.startColor = Opaque(settings.sparkColor);
         // World space: sparks bloom in place as the ball flies through, so you see a
@@ -693,9 +710,10 @@ public class DragonFireball : MonoBehaviour
         main.simulationSpace = ParticleSystemSimulationSpace.World;
         main.maxParticles = 80;
         main.gravityModifier = 0f;
+        main.simulationSpeed = anim;
 
         var emission = ps.emission;
-        emission.rateOverTime = settings.emberRate;
+        emission.rateOverTime = settings.emberRate * anim;
 
         // Sphere shell = sparks bloom outward around the silhouette (readable head-on).
         var shape = ps.shape;

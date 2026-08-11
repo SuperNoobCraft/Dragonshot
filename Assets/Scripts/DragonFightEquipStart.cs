@@ -2,9 +2,8 @@ using UnityEngine;
 using Votanic.vXR.vCast;
 
 /// <summary>
-/// Pre-fight tutorial: pick up ground bow, choose a difficulty quiver (Easy / Normal / Hard),
-/// optionally grab the scope, strap the quiver on, then auto-start the fight.
-/// Quivers/scope appear after the bow. After a quiver is chosen, other quivers hide —
+/// Pre-fight tutorial: choose a ground bow (with or without scope), pick a difficulty quiver,
+/// strap it on, then auto-start the fight. After a quiver is chosen, other quivers hide —
 /// click the fight panel to reset and choose again.
 /// </summary>
 public class DragonFightEquipStart : MonoBehaviour
@@ -15,6 +14,19 @@ public class DragonFightEquipStart : MonoBehaviour
         NeedQuiverPickup,
         NeedQuiverBack,
         Complete
+    }
+
+    [System.Serializable]
+    public class GroundBowChoice
+    {
+        [Tooltip("If true, this bow starts with the scope / trajectory preview equipped.")]
+        public bool withScope;
+        [Tooltip("Ground prop for this bow choice.")]
+        public GameObject groundVisual;
+        [Tooltip("Optional world pose. Empty = use the visual's scene pose.")]
+        public Transform groundAnchor;
+        [Tooltip("TMP / mesh label above the bow. Shown while choosing; does not spin.")]
+        public GameObject label;
     }
 
     [System.Serializable]
@@ -34,8 +46,10 @@ public class DragonFightEquipStart : MonoBehaviour
     [Tooltip("Playable bow (BowController) — usually under Frame. Disabled until picked up.")]
     [SerializeField] private BowController bow;
     [SerializeField] private LeftHandChild leftHandChild;
-    [Tooltip("Ground prop only — hidden once the real bow is equipped.")]
-    [SerializeField] private GameObject groundBowVisual;
+    [Tooltip("Two (or more) ground bows: typically one with scope, one without.")]
+    [SerializeField] private GroundBowChoice[] groundBows;
+    [Tooltip("Legacy single ground bow — migrated into Ground Bows if that array is empty.")]
+    [SerializeField, HideInInspector] private GameObject groundBowVisual;
     [Tooltip("Legacy single ground quiver (migrated to Normal if Difficulty Quivers is empty).")]
     [SerializeField] private GameObject groundQuiverVisual;
     [Tooltip("One entry per difficulty. Other quivers hide after one is picked (reset via fight panel).")]
@@ -45,14 +59,18 @@ public class DragonFightEquipStart : MonoBehaviour
     [Tooltip("Legacy single reference: used as ground and/or held quiver if the fields above are empty.")]
     [SerializeField] private Transform groundQuiver;
     [SerializeField] private DragonFightUI fightUI;
-    [Tooltip("World-space instruction signs hidden once the fight begins.")]
+    [Tooltip("World-space instruction signs that rise for equip and sink when the fight begins.")]
     [SerializeField] private GameObject[] instructionSigns;
-    [Tooltip("Optional scope pickups unlocked after the bow is equipped.")]
+    [Tooltip("How far below rest height signs bury (meters).")]
+    [SerializeField, Min(0.25f)] private float instructionSignBuryDepth = 3.5f;
+    [SerializeField, Min(0.1f)] private float instructionSignRiseSpeed = 3.5f;
+    [SerializeField, Min(0.1f)] private float instructionSignRetreatSpeed = 4.5f;
+    [Tooltip("Optional. Used only to sync the equipped scope mesh on the playable bow.")]
     [SerializeField] private ScopePickup[] scopePickups;
 
     [Header("Ground Poses")]
-    [Tooltip("Optional pickup position for the ground bow. Rotation always comes from Ground Bow Visual.")]
-    [SerializeField] private Transform groundBowAnchor;
+    [Tooltip("Legacy single bow anchor — migrated into Ground Bows.")]
+    [SerializeField, HideInInspector] private Transform groundBowAnchor;
     [Tooltip("Legacy single quiver anchor (used when migrating one quiver).")]
     [SerializeField] private Transform groundQuiverAnchor;
 
@@ -76,6 +94,10 @@ public class DragonFightEquipStart : MonoBehaviour
 
     [Header("Desktop Test Keys")]
     [SerializeField] private KeyCode desktopEquipBowKey = KeyCode.Alpha1;
+    [Tooltip("Desktop: pick the no-scope ground bow.")]
+    [SerializeField] private KeyCode desktopPickBowNoScopeKey = KeyCode.B;
+    [Tooltip("Desktop: pick the scoped ground bow.")]
+    [SerializeField] private KeyCode desktopPickBowWithScopeKey = KeyCode.G;
     [SerializeField] private KeyCode desktopPickupQuiverKey = KeyCode.Alpha2;
     [SerializeField] private KeyCode desktopMountQuiverKey = KeyCode.Alpha3;
     [SerializeField] private KeyCode desktopPickEasyKey = KeyCode.E;
@@ -107,20 +129,38 @@ public class DragonFightEquipStart : MonoBehaviour
         public bool valid;
     }
 
+    private enum SignMotion
+    {
+        Raised,
+        Rising,
+        Buried,
+        Retreating
+    }
+
+    private struct InstructionSignSlot
+    {
+        public Transform transform;
+        public Vector3 restPosition;
+        public float buriedY;
+        public SignMotion motion;
+        public bool cached;
+    }
+
     private EquipPhase phase = EquipPhase.NeedBow;
     private EquipPhase lastInstructionPhase = (EquipPhase)(-1);
     private float dwell;
-    private Vector3 bowGroundPosition;
-    private Quaternion bowGroundRotation;
-    private Transform bowGroundParent;
+    private QuiverPoseCache[] bowPoseCache = System.Array.Empty<QuiverPoseCache>();
+    private LabelPoseCache[] bowLabelPoseCache = System.Array.Empty<LabelPoseCache>();
     private QuiverPoseCache[] quiverPoseCache = System.Array.Empty<QuiverPoseCache>();
     private LabelPoseCache[] labelPoseCache = System.Array.Empty<LabelPoseCache>();
+    private InstructionSignSlot[] instructionSignSlots = System.Array.Empty<InstructionSignSlot>();
     private float[] quiverSpinAngles = System.Array.Empty<float>();
-    private float bowSpinAngle;
+    private float[] bowSpinAngles = System.Array.Empty<float>();
     private bool groundPosesCached;
     private bool startedFight;
     private bool quiverHeld;
     private int selectedQuiverIndex = -1;
+    private int selectedBowIndex = -1;
     private FightDifficulty selectedDifficulty = FightDifficulty.Normal;
 
     public bool IsBowEquipped => phase != EquipPhase.NeedBow;
@@ -128,10 +168,9 @@ public class DragonFightEquipStart : MonoBehaviour
     public FightDifficulty SelectedDifficulty => selectedDifficulty;
 
     /// <summary>
-    /// True while the equip tutorial is running and the scope should wait for quiver choice.
+    /// Equip tutorial chooses scope with the bow; ground scope pickups stay hidden.
     /// </summary>
-    public bool DefersScopeUntilQuiverChosen =>
-        isActiveAndEnabled && phase != EquipPhase.Complete;
+    public bool DefersScopeUntilQuiverChosen => isActiveAndEnabled;
 
     public void Assign(
         DragonBoss boss,
@@ -158,13 +197,16 @@ public class DragonFightEquipStart : MonoBehaviour
         fightUI = ui;
         instructionSigns = signs;
         EnsureDifficultyQuiversMigrated();
+        EnsureGroundBowsMigrated();
     }
 
     private void Awake()
     {
         ResolveReferences();
         EnsureDifficultyQuiversMigrated();
+        EnsureGroundBowsMigrated();
         CacheGroundPosesIfNeeded();
+        CacheInstructionSignPoses();
     }
 
     private void Start()
@@ -180,6 +222,7 @@ public class DragonFightEquipStart : MonoBehaviour
         }
 
         UpdateIdlePropSpin();
+        UpdateInstructionSigns();
 
         if (dragon == null || bow == null || phase == EquipPhase.Complete)
         {
@@ -205,15 +248,25 @@ public class DragonFightEquipStart : MonoBehaviour
 
         float delta = idleSpinDegreesPerSecond * Time.deltaTime;
 
-        if (phase == EquipPhase.NeedBow
-            && groundBowVisual != null
-            && groundBowVisual.activeSelf)
+        if (phase == EquipPhase.NeedBow)
         {
-            bowSpinAngle += delta;
-            Vector3 axis = ResolveSpinAxis(groundBowAnchor);
-            // World-axis spin: AngleAxis * rest (keeps upright props turning like a turntable).
-            groundBowVisual.transform.rotation =
-                Quaternion.AngleAxis(bowSpinAngle, axis) * bowGroundRotation;
+            EnsureBowSpinAngleBuffer();
+            for (int i = 0; i < GroundBowCount; i++)
+            {
+                GameObject prop = GetBowGroundObject(i);
+                QuiverPoseCache pose = GetBowPose(i);
+                if (prop == null || !prop.activeSelf || !pose.valid)
+                {
+                    continue;
+                }
+
+                Transform anchor = groundBows[i] != null ? groundBows[i].groundAnchor : null;
+                Vector3 axis = ResolveSpinAxis(anchor);
+                bowSpinAngles[i] += delta;
+                prop.transform.rotation =
+                    Quaternion.AngleAxis(bowSpinAngles[i], axis) * pose.rotation;
+            }
+
             return;
         }
 
@@ -276,7 +329,8 @@ public class DragonFightEquipStart : MonoBehaviour
             SyncHeldQuiverToHand();
         }
 
-        // Keep assigned difficulty labels locked to their anchor pose (never spin).
+        // Keep assigned labels locked to their anchor pose (never spin).
+        StabilizeBowLabels();
         StabilizeDifficultyLabels();
     }
 
@@ -284,20 +338,24 @@ public class DragonFightEquipStart : MonoBehaviour
     {
         ResolveReferences();
         EnsureDifficultyQuiversMigrated();
+        EnsureGroundBowsMigrated();
         // Keep the original scene poses — do not re-cache after idle spin.
         CacheGroundPosesIfNeeded();
         ResetIdleSpinAngles();
         startedFight = false;
         quiverHeld = false;
         selectedQuiverIndex = -1;
+        selectedBowIndex = -1;
         selectedDifficulty = FightDifficulty.Normal;
         dwell = 0f;
         phase = EquipPhase.NeedBow;
         lastInstructionPhase = (EquipPhase)(-1);
 
         SetPlayableBowEquipped(false);
-        PlaceGroundBowVisual();
-        // Quivers stay hidden until the bow is equipped.
+        ApplyScopeFromBowChoice(false);
+        ShowAllGroundBows();
+        ShowBowLabels();
+        // Quivers stay hidden until a bow is equipped.
         HideAllGroundQuivers();
         HideDifficultyLabels();
         HideHeldQuiver();
@@ -316,12 +374,13 @@ public class DragonFightEquipStart : MonoBehaviour
         switch (phase)
         {
             case EquipPhase.NeedBow:
-                if (IsNearPickup(leftHandName, GetBowPickupPoint()))
+                int nearBow = FindNearestGroundBowIndex();
+                if (nearBow >= 0)
                 {
                     dwell += Time.deltaTime;
                     if (dwell >= mountDwellSeconds)
                     {
-                        EquipBow();
+                        EquipBow(nearBow);
                     }
                 }
                 else
@@ -349,7 +408,7 @@ public class DragonFightEquipStart : MonoBehaviour
                 break;
 
             case EquipPhase.NeedQuiverBack:
-                // Choice is locked — strap on, grab scope, or click the panel to reset.
+                // Choice is locked — strap on, or click the panel to reset.
                 if (bow != null && bow.IsRightHandAtBackQuiverZone())
                 {
                     dwell += Time.deltaTime;
@@ -369,10 +428,30 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void UpdateDesktopShortcuts()
     {
-        if (phase == EquipPhase.NeedBow && Input.GetKeyDown(desktopEquipBowKey))
+        if (phase == EquipPhase.NeedBow)
         {
-            EquipBow();
-            return;
+            if (Input.GetKeyDown(desktopPickBowNoScopeKey))
+            {
+                TryDesktopPickBow(withScope: false);
+                return;
+            }
+
+            if (Input.GetKeyDown(desktopPickBowWithScopeKey))
+            {
+                TryDesktopPickBow(withScope: true);
+                return;
+            }
+
+            if (Input.GetKeyDown(desktopEquipBowKey))
+            {
+                int nearest = FindNearestGroundBowIndex(ignoreDistance: true);
+                if (nearest >= 0)
+                {
+                    EquipBow(nearest);
+                }
+
+                return;
+            }
         }
 
         if (phase == EquipPhase.NeedQuiverPickup || phase == EquipPhase.NeedQuiverBack)
@@ -410,6 +489,25 @@ public class DragonFightEquipStart : MonoBehaviour
         }
     }
 
+    private void TryDesktopPickBow(bool withScope)
+    {
+        if (phase != EquipPhase.NeedBow)
+        {
+            return;
+        }
+
+        int index = IndexOfBow(withScope);
+        if (index < 0)
+        {
+            index = FindNearestGroundBowIndex(ignoreDistance: true);
+        }
+
+        if (index >= 0)
+        {
+            EquipBow(index);
+        }
+    }
+
     private void TryDesktopPickDifficulty(FightDifficulty difficulty)
     {
         int index = IndexOfDifficulty(difficulty);
@@ -421,14 +519,20 @@ public class DragonFightEquipStart : MonoBehaviour
         PickupQuiver(index);
     }
 
-    private void EquipBow()
+    private void EquipBow(int index)
     {
-        SetPlayableBowEquipped(true);
-
-        if (groundBowVisual != null)
+        if (!IsValidBowIndex(index) || phase != EquipPhase.NeedBow)
         {
-            groundBowVisual.SetActive(false);
+            return;
         }
+
+        selectedBowIndex = index;
+        bool withScope = groundBows[index] != null && groundBows[index].withScope;
+
+        SetPlayableBowEquipped(true);
+        ApplyScopeFromBowChoice(withScope);
+        HideAllGroundBows();
+        HideBowLabels();
 
         dwell = 0f;
         phase = EquipPhase.NeedQuiverPickup;
@@ -437,6 +541,11 @@ public class DragonFightEquipStart : MonoBehaviour
         ShowAllGroundQuivers();
         ShowDifficultyLabels();
         FightAudio.PlayEquipBow(transform.position);
+        if (withScope)
+        {
+            FightAudio.PlayEquipScope(transform.position);
+        }
+
         RefreshInstructionsIfNeeded();
     }
 
@@ -453,7 +562,6 @@ public class DragonFightEquipStart : MonoBehaviour
 
         AttachQuiverToHand(index);
         HideUnselectedQuiversAndLabels(index);
-        ShowScopePickups();
         FightAudio.PlayEquipQuiverPickup(GetHeldQuiverWorldPosition());
 
         dwell = 0f;
@@ -674,14 +782,134 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void PlaceGroundBowVisual()
     {
-        if (groundBowVisual == null)
+        ShowAllGroundBows();
+    }
+
+    private void ShowAllGroundBows()
+    {
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            PlaceBowOnGround(i);
+        }
+    }
+
+    private void HideAllGroundBows()
+    {
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            GameObject prop = GetBowGroundObject(i);
+            if (prop == null)
+            {
+                continue;
+            }
+
+            QuiverPoseCache pose = GetBowPose(i);
+            if (pose.valid)
+            {
+                prop.transform.SetParent(pose.parent, true);
+                prop.transform.SetPositionAndRotation(pose.position, pose.rotation);
+            }
+
+            prop.SetActive(false);
+        }
+    }
+
+    private void PlaceBowOnGround(int index)
+    {
+        GameObject prop = GetBowGroundObject(index);
+        if (prop == null)
         {
             return;
         }
 
-        groundBowVisual.transform.SetPositionAndRotation(bowGroundPosition, bowGroundRotation);
-        groundBowVisual.transform.SetParent(bowGroundParent, true);
-        groundBowVisual.SetActive(true);
+        QuiverPoseCache pose = GetBowPose(index);
+        if (pose.valid)
+        {
+            prop.transform.SetParent(pose.parent, true);
+            prop.transform.SetPositionAndRotation(pose.position, pose.rotation);
+        }
+
+        prop.SetActive(true);
+    }
+
+    private void ShowBowLabels()
+    {
+        CacheBowLabelPosesIfNeeded();
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            SetBowLabelVisible(i, true);
+        }
+    }
+
+    private void HideBowLabels()
+    {
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            SetBowLabelVisible(i, false);
+        }
+    }
+
+    private void SetBowLabelVisible(int index, bool visible)
+    {
+        if (!IsValidBowIndex(index))
+        {
+            return;
+        }
+
+        GameObject label = groundBows[index].label;
+        if (label == null)
+        {
+            return;
+        }
+
+        if (visible)
+        {
+            RestoreBowLabelPose(index);
+        }
+
+        label.SetActive(visible);
+    }
+
+    private void StabilizeBowLabels()
+    {
+        if (phase != EquipPhase.NeedBow)
+        {
+            return;
+        }
+
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            GameObject label = groundBows[i] != null ? groundBows[i].label : null;
+            if (label == null || !label.activeSelf)
+            {
+                continue;
+            }
+
+            RestoreBowLabelPose(i);
+        }
+    }
+
+    private void RestoreBowLabelPose(int index)
+    {
+        if (bowLabelPoseCache == null || index < 0 || index >= bowLabelPoseCache.Length)
+        {
+            return;
+        }
+
+        LabelPoseCache pose = bowLabelPoseCache[index];
+        if (!pose.valid || !IsValidBowIndex(index) || groundBows[index].label == null)
+        {
+            return;
+        }
+
+        Transform t = groundBows[index].label.transform;
+        if (pose.parent != null && t.parent != pose.parent)
+        {
+            t.SetParent(pose.parent, false);
+        }
+
+        t.localPosition = pose.localPosition;
+        t.localRotation = pose.localRotation;
     }
 
     private void ShowAllGroundQuivers()
@@ -887,21 +1115,36 @@ public class DragonFightEquipStart : MonoBehaviour
     private void EnsureSpinAngleBuffer()
     {
         int count = DifficultyQuiverCount;
-        if (quiverSpinAngles != null && quiverSpinAngles.Length == count)
+        if (quiverSpinAngles == null || quiverSpinAngles.Length != count)
+        {
+            quiverSpinAngles = new float[count];
+        }
+
+        EnsureBowSpinAngleBuffer();
+    }
+
+    private void EnsureBowSpinAngleBuffer()
+    {
+        int count = GroundBowCount;
+        if (bowSpinAngles != null && bowSpinAngles.Length == count)
         {
             return;
         }
 
-        quiverSpinAngles = new float[count];
+        bowSpinAngles = new float[count];
     }
 
     private void ResetIdleSpinAngles()
     {
-        bowSpinAngle = 0f;
         EnsureSpinAngleBuffer();
         for (int i = 0; i < quiverSpinAngles.Length; i++)
         {
             quiverSpinAngles[i] = 0f;
+        }
+
+        for (int i = 0; i < bowSpinAngles.Length; i++)
+        {
+            bowSpinAngles[i] = 0f;
         }
     }
 
@@ -1192,23 +1435,6 @@ public class DragonFightEquipStart : MonoBehaviour
         }
     }
 
-    private void ShowScopePickups()
-    {
-        ResolveScopePickups();
-        if (scopePickups == null)
-        {
-            return;
-        }
-
-        for (int i = 0; i < scopePickups.Length; i++)
-        {
-            if (scopePickups[i] != null)
-            {
-                scopePickups[i].ShowAfterBowEquipped();
-            }
-        }
-    }
-
     private void ExpireScopePickupsIfNeeded()
     {
         ResolveScopePickups();
@@ -1228,7 +1454,11 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void CacheGroundPosesIfNeeded()
     {
-        if (groundPosesCached && quiverPoseCache != null && quiverPoseCache.Length == DifficultyQuiverCount)
+        if (groundPosesCached
+            && quiverPoseCache != null
+            && quiverPoseCache.Length == DifficultyQuiverCount
+            && bowPoseCache != null
+            && bowPoseCache.Length == GroundBowCount)
         {
             bool allValid = true;
             for (int i = 0; i < quiverPoseCache.Length; i++)
@@ -1237,6 +1467,14 @@ public class DragonFightEquipStart : MonoBehaviour
                 {
                     allValid = false;
                     break;
+                }
+            }
+
+            for (int i = 0; allValid && i < bowPoseCache.Length; i++)
+            {
+                if (!bowPoseCache[i].valid && IsValidBowIndex(i))
+                {
+                    allValid = false;
                 }
             }
 
@@ -1251,16 +1489,7 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void CacheGroundPoses()
     {
-        if (groundBowVisual != null && !groundPosesCached)
-        {
-            bowGroundPosition = groundBowAnchor != null
-                ? groundBowAnchor.position
-                : groundBowVisual.transform.position;
-            bowGroundRotation = groundBowVisual.transform.rotation;
-            bowGroundParent = groundBowAnchor != null
-                ? groundBowAnchor.parent
-                : groundBowVisual.transform.parent;
-        }
+        CacheBowPoses();
 
         int count = DifficultyQuiverCount;
         QuiverPoseCache[] next = new QuiverPoseCache[count];
@@ -1296,8 +1525,101 @@ public class DragonFightEquipStart : MonoBehaviour
 
         quiverPoseCache = next;
         CacheLabelPoses();
+        CacheBowLabelPoses();
         groundPosesCached = true;
         EnsureSpinAngleBuffer();
+    }
+
+    private void CacheBowPoses()
+    {
+        int count = GroundBowCount;
+        QuiverPoseCache[] next = new QuiverPoseCache[count];
+        for (int i = 0; i < count; i++)
+        {
+            if (bowPoseCache != null
+                && i < bowPoseCache.Length
+                && bowPoseCache[i].valid)
+            {
+                next[i] = bowPoseCache[i];
+                continue;
+            }
+
+            if (!IsValidBowIndex(i))
+            {
+                continue;
+            }
+
+            GroundBowChoice option = groundBows[i];
+            Transform anchor = option.groundAnchor;
+            next[i] = new QuiverPoseCache
+            {
+                position = anchor != null
+                    ? anchor.position
+                    : option.groundVisual.transform.position,
+                rotation = option.groundVisual.transform.rotation,
+                parent = anchor != null
+                    ? anchor.parent
+                    : option.groundVisual.transform.parent,
+                valid = true
+            };
+        }
+
+        bowPoseCache = next;
+    }
+
+    private void CacheBowLabelPosesIfNeeded()
+    {
+        if (bowLabelPoseCache != null && bowLabelPoseCache.Length == GroundBowCount)
+        {
+            bool anyValid = false;
+            for (int i = 0; i < bowLabelPoseCache.Length; i++)
+            {
+                if (bowLabelPoseCache[i].valid)
+                {
+                    anyValid = true;
+                    break;
+                }
+            }
+
+            if (anyValid)
+            {
+                return;
+            }
+        }
+
+        CacheBowLabelPoses();
+    }
+
+    private void CacheBowLabelPoses()
+    {
+        int count = GroundBowCount;
+        LabelPoseCache[] next = new LabelPoseCache[count];
+        for (int i = 0; i < count; i++)
+        {
+            if (bowLabelPoseCache != null
+                && i < bowLabelPoseCache.Length
+                && bowLabelPoseCache[i].valid)
+            {
+                next[i] = bowLabelPoseCache[i];
+                continue;
+            }
+
+            if (!IsValidBowIndex(i) || groundBows[i].label == null)
+            {
+                continue;
+            }
+
+            Transform t = groundBows[i].label.transform;
+            next[i] = new LabelPoseCache
+            {
+                localPosition = t.localPosition,
+                localRotation = t.localRotation,
+                parent = t.parent,
+                valid = true
+            };
+        }
+
+        bowLabelPoseCache = next;
     }
 
     private void CacheLabelPoses()
@@ -1332,8 +1654,176 @@ public class DragonFightEquipStart : MonoBehaviour
         labelPoseCache = next;
     }
 
+    private int GroundBowCount => groundBows != null ? groundBows.Length : 0;
+
+    private bool IsValidBowIndex(int index)
+    {
+        return index >= 0
+               && groundBows != null
+               && index < groundBows.Length
+               && groundBows[index] != null
+               && groundBows[index].groundVisual != null;
+    }
+
+    private GameObject GetBowGroundObject(int index)
+    {
+        return IsValidBowIndex(index) ? groundBows[index].groundVisual : null;
+    }
+
+    private QuiverPoseCache GetBowPose(int index)
+    {
+        if (bowPoseCache != null && index >= 0 && index < bowPoseCache.Length)
+        {
+            return bowPoseCache[index];
+        }
+
+        return default;
+    }
+
+    private int IndexOfBow(bool withScope)
+    {
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            if (IsValidBowIndex(i) && groundBows[i].withScope == withScope)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private int FindNearestGroundBowIndex(bool ignoreDistance = false)
+    {
+        Transform hand = FindHand(leftHandName);
+        Camera cam = null;
+        if (PlayEnvironment.IsDesktopInput && desktopProximityPickup)
+        {
+            cam = PlayEnvironment.ResolveViewCamera();
+        }
+
+        int best = -1;
+        float bestDist = float.MaxValue;
+
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            GameObject prop = GetBowGroundObject(i);
+            if (prop == null || !prop.activeInHierarchy)
+            {
+                continue;
+            }
+
+            Vector3 point = prop.transform.position;
+            float dist = float.MaxValue;
+
+            if (hand != null)
+            {
+                dist = Mathf.Min(dist, Vector3.Distance(hand.position, point));
+            }
+
+            if (IsHandNear(leftHandName, point, pickupDistance * 4f))
+            {
+                Transform named = FindHand(leftHandName);
+                if (named != null)
+                {
+                    dist = Mathf.Min(dist, Vector3.Distance(named.position, point));
+                }
+            }
+
+            if (cam != null)
+            {
+                dist = Mathf.Min(dist, Vector3.Distance(cam.transform.position, point));
+            }
+
+            if (ignoreDistance)
+            {
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = i;
+                }
+
+                continue;
+            }
+
+            float limit = cam != null && hand == null ? pickupDistance * 1.35f : pickupDistance;
+            if (dist <= limit && dist < bestDist)
+            {
+                bestDist = dist;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
+    private void EnsureGroundBowsMigrated()
+    {
+        if (groundBows != null && groundBows.Length > 0)
+        {
+            bool any = false;
+            for (int i = 0; i < groundBows.Length; i++)
+            {
+                if (groundBows[i] != null && groundBows[i].groundVisual != null)
+                {
+                    any = true;
+                    break;
+                }
+            }
+
+            if (any)
+            {
+                return;
+            }
+        }
+
+        if (groundBowVisual == null)
+        {
+            return;
+        }
+
+        groundBows = new[]
+        {
+            new GroundBowChoice
+            {
+                withScope = false,
+                groundVisual = groundBowVisual,
+                groundAnchor = groundBowAnchor,
+                label = null
+            }
+        };
+    }
+
+    private void ApplyScopeFromBowChoice(bool withScope)
+    {
+        if (bow != null)
+        {
+            bow.SetScopeEquipped(withScope);
+        }
+
+        ResolveScopePickups();
+        if (scopePickups == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < scopePickups.Length; i++)
+        {
+            if (scopePickups[i] != null)
+            {
+                scopePickups[i].ApplyEquippedFromBowChoice(withScope);
+            }
+        }
+    }
+
     private Vector3 GetBowPickupPoint()
     {
+        int nearest = FindNearestGroundBowIndex(ignoreDistance: true);
+        if (nearest >= 0)
+        {
+            return GetBowGroundObject(nearest).transform.position;
+        }
+
         if (groundBowVisual != null)
         {
             return groundBowVisual.transform.position;
@@ -1388,16 +1878,172 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void SetInstructionSignsVisible(bool visible)
     {
-        if (instructionSigns == null)
+        CacheInstructionSignPoses();
+        if (visible)
+        {
+            BeginRaiseInstructionSigns();
+        }
+        else
+        {
+            BeginSinkInstructionSigns();
+        }
+    }
+
+    private void CacheInstructionSignPoses()
+    {
+        int count = instructionSigns != null ? instructionSigns.Length : 0;
+        if (instructionSignSlots == null || instructionSignSlots.Length != count)
+        {
+            instructionSignSlots = new InstructionSignSlot[count];
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            GameObject sign = instructionSigns[i];
+            if (sign == null)
+            {
+                instructionSignSlots[i] = default;
+                continue;
+            }
+
+            InstructionSignSlot slot = instructionSignSlots[i];
+            if (slot.cached && slot.transform == sign.transform)
+            {
+                // Keep original rest pose (do not re-cache mid-bury).
+                slot.buriedY = slot.restPosition.y - Mathf.Abs(instructionSignBuryDepth);
+                instructionSignSlots[i] = slot;
+                continue;
+            }
+
+            Transform t = sign.transform;
+            Vector3 rest = t.position;
+            instructionSignSlots[i] = new InstructionSignSlot
+            {
+                transform = t,
+                restPosition = rest,
+                buriedY = rest.y - Mathf.Abs(instructionSignBuryDepth),
+                motion = SignMotion.Raised,
+                cached = true
+            };
+        }
+    }
+
+    private void BeginRaiseInstructionSigns()
+    {
+        CacheInstructionSignPoses();
+        for (int i = 0; i < instructionSignSlots.Length; i++)
+        {
+            InstructionSignSlot slot = instructionSignSlots[i];
+            if (!slot.cached || slot.transform == null)
+            {
+                continue;
+            }
+
+            if (!slot.transform.gameObject.activeSelf)
+            {
+                slot.transform.gameObject.SetActive(true);
+            }
+
+            // Already up — snap to rest.
+            if (Mathf.Abs(slot.transform.position.y - slot.restPosition.y) <= 0.02f
+                && slot.motion != SignMotion.Retreating)
+            {
+                Vector3 p = slot.restPosition;
+                slot.transform.position = p;
+                slot.motion = SignMotion.Raised;
+            }
+            else
+            {
+                slot.motion = SignMotion.Rising;
+            }
+
+            instructionSignSlots[i] = slot;
+        }
+    }
+
+    private void BeginSinkInstructionSigns()
+    {
+        CacheInstructionSignPoses();
+        for (int i = 0; i < instructionSignSlots.Length; i++)
+        {
+            InstructionSignSlot slot = instructionSignSlots[i];
+            if (!slot.cached || slot.transform == null)
+            {
+                continue;
+            }
+
+            if (!slot.transform.gameObject.activeSelf)
+            {
+                slot.transform.gameObject.SetActive(true);
+            }
+
+            slot.buriedY = slot.restPosition.y - Mathf.Abs(instructionSignBuryDepth);
+            if (Mathf.Abs(slot.transform.position.y - slot.buriedY) <= 0.02f)
+            {
+                Vector3 p = slot.transform.position;
+                p.y = slot.buriedY;
+                slot.transform.position = p;
+                slot.motion = SignMotion.Buried;
+            }
+            else
+            {
+                slot.motion = SignMotion.Retreating;
+            }
+
+            instructionSignSlots[i] = slot;
+        }
+    }
+
+    private void UpdateInstructionSigns()
+    {
+        if (instructionSignSlots == null || instructionSignSlots.Length == 0)
         {
             return;
         }
 
-        for (int i = 0; i < instructionSigns.Length; i++)
+        float dt = Time.deltaTime;
+        for (int i = 0; i < instructionSignSlots.Length; i++)
         {
-            if (instructionSigns[i] != null)
+            InstructionSignSlot slot = instructionSignSlots[i];
+            if (!slot.cached || slot.transform == null)
             {
-                instructionSigns[i].SetActive(visible);
+                continue;
+            }
+
+            if (slot.motion == SignMotion.Rising)
+            {
+                Vector3 p = slot.transform.position;
+                float nextY = Mathf.MoveTowards(p.y, slot.restPosition.y, instructionSignRiseSpeed * dt);
+                p.x = slot.restPosition.x;
+                p.z = slot.restPosition.z;
+                p.y = nextY;
+                slot.transform.position = p;
+                if (Mathf.Abs(nextY - slot.restPosition.y) <= 0.01f)
+                {
+                    p.y = slot.restPosition.y;
+                    slot.transform.position = p;
+                    slot.motion = SignMotion.Raised;
+                }
+
+                instructionSignSlots[i] = slot;
+            }
+            else if (slot.motion == SignMotion.Retreating)
+            {
+                Vector3 p = slot.transform.position;
+                float buriedY = slot.restPosition.y - Mathf.Abs(instructionSignBuryDepth);
+                float nextY = Mathf.MoveTowards(p.y, buriedY, instructionSignRetreatSpeed * dt);
+                p.x = slot.restPosition.x;
+                p.z = slot.restPosition.z;
+                p.y = nextY;
+                slot.transform.position = p;
+                if (Mathf.Abs(nextY - buriedY) <= 0.01f)
+                {
+                    p.y = buriedY;
+                    slot.transform.position = p;
+                    slot.motion = SignMotion.Buried;
+                }
+
+                instructionSignSlots[i] = slot;
             }
         }
     }
@@ -1466,4 +2112,298 @@ public class DragonFightEquipStart : MonoBehaviour
 
         return null;
     }
+
+#if UNITY_EDITOR
+    /// <summary>
+    /// Upgrades a single legacy ground bow into No Scope + With Scope choices with labels.
+    /// </summary>
+    [ContextMenu("Ensure Dual Ground Bows With Labels")]
+    public void EnsureDualGroundBowsWithLabels()
+    {
+        EnsureGroundBowsMigrated();
+        EnsureDifficultyQuiversMigrated();
+
+        GroundBowChoice source = null;
+        if (groundBows != null)
+        {
+            for (int i = 0; i < groundBows.Length; i++)
+            {
+                if (groundBows[i] != null && groundBows[i].groundVisual != null)
+                {
+                    source = groundBows[i];
+                    break;
+                }
+            }
+        }
+
+        if (source == null && groundBowVisual != null)
+        {
+            source = new GroundBowChoice
+            {
+                withScope = false,
+                groundVisual = groundBowVisual,
+                groundAnchor = groundBowAnchor,
+                label = null
+            };
+        }
+
+        if (source == null || source.groundVisual == null)
+        {
+            Debug.LogWarning(
+                "DragonFightEquipStart: no ground bow visual to duplicate.",
+                this);
+            return;
+        }
+
+        bool hasNoScope = IndexOfBow(false) >= 0;
+        bool hasWithScope = IndexOfBow(true) >= 0;
+
+        if (hasNoScope && hasWithScope)
+        {
+            EnsureBowLabelsExist();
+            EnsureDifficultyLabelsExist();
+            groundPosesCached = false;
+            bowLabelPoseCache = System.Array.Empty<LabelPoseCache>();
+            CacheGroundPoses();
+            UnityEditor.EditorUtility.SetDirty(this);
+            Debug.Log("DragonFightEquipStart: dual bows present — ensured labels.", this);
+            return;
+        }
+
+        Transform parent = transform;
+        Vector3 basePos = source.groundAnchor != null
+            ? source.groundAnchor.position
+            : source.groundVisual.transform.position;
+        Quaternion baseRot = source.groundVisual.transform.rotation;
+        Vector3 right = source.groundAnchor != null
+            ? source.groundAnchor.right
+            : source.groundVisual.transform.right;
+
+        GroundBowChoice noScope = hasNoScope
+            ? groundBows[IndexOfBow(false)]
+            : BuildBowChoice(
+                source,
+                withScope: false,
+                "GroundBow_NoScope",
+                basePos - right * 0.55f,
+                baseRot,
+                parent);
+
+        GroundBowChoice withScopeChoice = hasWithScope
+            ? groundBows[IndexOfBow(true)]
+            : BuildBowChoice(
+                source,
+                withScope: true,
+                "GroundBow_WithScope",
+                basePos + right * 0.55f,
+                baseRot,
+                parent);
+
+        if (withScopeChoice.groundVisual != null
+            && withScopeChoice.groundVisual.transform.Find("GroundScopeVisual") == null)
+        {
+            AttachScopeIndicatorEditor(withScopeChoice.groundVisual.transform);
+        }
+
+        // Hide / leave the old single center bow if it was neither of the two slots.
+        if (source.groundVisual != null
+            && source.groundVisual != noScope.groundVisual
+            && source.groundVisual != withScopeChoice.groundVisual)
+        {
+            source.groundVisual.SetActive(false);
+            if (source.label != null)
+            {
+                source.label.SetActive(false);
+            }
+        }
+
+        groundBows = new[] { noScope, withScopeChoice };
+        groundBowVisual = noScope.groundVisual;
+        groundBowAnchor = noScope.groundAnchor;
+
+        EnsureBowLabelsExist();
+        EnsureDifficultyLabelsExist();
+
+        groundPosesCached = false;
+        bowLabelPoseCache = System.Array.Empty<LabelPoseCache>();
+        CacheGroundPoses();
+        UnityEditor.EditorUtility.SetDirty(this);
+        Debug.Log(
+            "DragonFightEquipStart: ensured No Scope / With Scope ground bows with labels.",
+            this);
+    }
+
+    private GroundBowChoice BuildBowChoice(
+        GroundBowChoice template,
+        bool withScope,
+        string name,
+        Vector3 position,
+        Quaternion rotation,
+        Transform parent)
+    {
+        GameObject anchorGo = new GameObject(name + "Anchor");
+        anchorGo.transform.SetParent(parent, true);
+        anchorGo.transform.SetPositionAndRotation(position, rotation);
+
+        GameObject visual;
+        if (!withScope
+            && template.groundVisual != null
+            && IndexOfBow(false) < 0
+            && IndexOfBow(true) < 0)
+        {
+            // Reuse the existing single bow as the no-scope choice.
+            visual = template.groundVisual;
+            visual.name = name;
+            visual.transform.SetPositionAndRotation(position, rotation);
+        }
+        else
+        {
+            visual = UnityEngine.Object.Instantiate(template.groundVisual);
+            visual.name = name;
+            visual.transform.SetParent(parent, true);
+            visual.transform.SetPositionAndRotation(position, rotation);
+            visual.SetActive(true);
+        }
+
+        return new GroundBowChoice
+        {
+            withScope = withScope,
+            groundVisual = visual,
+            groundAnchor = anchorGo.transform,
+            label = null
+        };
+    }
+
+    private void EnsureBowLabelsExist()
+    {
+        if (groundBows == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < groundBows.Length; i++)
+        {
+            if (groundBows[i] == null || groundBows[i].groundVisual == null)
+            {
+                continue;
+            }
+
+            if (groundBows[i].label != null)
+            {
+                TextMesh existing = groundBows[i].label.GetComponent<TextMesh>();
+                if (existing != null)
+                {
+                    existing.text = groundBows[i].withScope ? "With Scope" : "No Scope";
+                }
+
+                continue;
+            }
+
+            Vector3 pos = groundBows[i].groundAnchor != null
+                ? groundBows[i].groundAnchor.position
+                : groundBows[i].groundVisual.transform.position;
+            groundBows[i].label = CreateWorldTextLabelEditor(
+                groundBows[i].withScope ? "With Scope" : "No Scope",
+                pos + Vector3.up * 0.55f,
+                transform,
+                groundBows[i].withScope ? "GroundBow_WithScopeLabel" : "GroundBow_NoScopeLabel");
+        }
+    }
+
+    private void EnsureDifficultyLabelsExist()
+    {
+        if (difficultyQuivers == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < difficultyQuivers.Length; i++)
+        {
+            if (difficultyQuivers[i] == null || difficultyQuivers[i].groundVisual == null)
+            {
+                continue;
+            }
+
+            if (difficultyQuivers[i].label != null)
+            {
+                continue;
+            }
+
+            Vector3 pos = difficultyQuivers[i].groundAnchor != null
+                ? difficultyQuivers[i].groundAnchor.position
+                : difficultyQuivers[i].groundVisual.transform.position;
+            string text = difficultyQuivers[i].difficulty.ToString();
+            difficultyQuivers[i].label = CreateWorldTextLabelEditor(
+                text,
+                pos + Vector3.up * 0.55f,
+                transform,
+                "GroundQuiver_" + text + "Label");
+        }
+    }
+
+    private static GameObject CreateWorldTextLabelEditor(
+        string text,
+        Vector3 worldPosition,
+        Transform parent,
+        string objectName)
+    {
+        GameObject labelGo = new GameObject(objectName);
+        labelGo.transform.SetParent(parent, true);
+        labelGo.transform.position = worldPosition;
+        labelGo.transform.rotation = Quaternion.identity;
+
+        TextMesh textMesh = labelGo.AddComponent<TextMesh>();
+        textMesh.text = text;
+        textMesh.anchor = TextAnchor.MiddleCenter;
+        textMesh.alignment = TextAlignment.Center;
+        textMesh.characterSize = 0.06f;
+        textMesh.fontSize = 48;
+        textMesh.color = Color.white;
+        return labelGo;
+    }
+
+    private static void AttachScopeIndicatorEditor(Transform bowRoot)
+    {
+        if (bowRoot == null || bowRoot.Find("GroundScopeVisual") != null)
+        {
+            return;
+        }
+
+        ScopePickup scope = FindObjectOfType<ScopePickup>();
+        GameObject equipped = null;
+        if (scope != null)
+        {
+            UnityEditor.SerializedObject so = new UnityEditor.SerializedObject(scope);
+            UnityEditor.SerializedProperty prop = so.FindProperty("equippedVisual");
+            if (prop != null)
+            {
+                equipped = prop.objectReferenceValue as GameObject;
+            }
+        }
+
+        if (equipped != null)
+        {
+            GameObject clone = UnityEngine.Object.Instantiate(equipped, bowRoot);
+            clone.name = "GroundScopeVisual";
+            clone.SetActive(true);
+            return;
+        }
+
+        GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        marker.name = "GroundScopeVisual";
+        marker.transform.SetParent(bowRoot, false);
+        marker.transform.localPosition = new Vector3(0f, 0.12f, 0.05f);
+        marker.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        marker.transform.localScale = new Vector3(0.04f, 0.12f, 0.04f);
+        DestroyImmediate(marker.GetComponent<Collider>());
+        MeshRenderer mr = marker.GetComponent<MeshRenderer>();
+        if (mr != null)
+        {
+            mr.sharedMaterial = new Material(Shader.Find("Standard"))
+            {
+                color = new Color(0.25f, 0.85f, 0.35f, 1f)
+            };
+        }
+    }
+#endif
 }

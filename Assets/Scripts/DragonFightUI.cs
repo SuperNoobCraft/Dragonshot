@@ -31,13 +31,14 @@ public class DragonFightUI : MonoBehaviour
 
     [Header("Equip Tutorial (pre-fight)")]
     [TextArea(2, 3)]
-    [SerializeField] private string equipStep1PickUpBow = "Step 1\nPick up the bow\nwith your left hand.";
+    [SerializeField] private string equipStep1PickUpBow =
+        "Step 1\nPick a bow (with or without scope)\nwith your left hand.";
     [TextArea(2, 3)]
     [SerializeField] private string equipStep2PickUpQuiver =
         "Step 2\nPick a quiver (Easy / Normal / Hard).";
     [TextArea(2, 3)]
     [SerializeField] private string equipStep3BehindBack =
-        "Step 3\nStrap the quiver on your back.\n(Optional: grab the scope now)\nClick here to reset.";
+        "Step 3\nStrap the quiver on your back.\nClick here to reset.";
 
     [TextArea(2, 4)]
     [Tooltip("{0} = seconds left, {1} = current HP, {2} = max HP, {3} = difficulty")]

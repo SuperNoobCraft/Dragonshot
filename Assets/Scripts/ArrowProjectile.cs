@@ -30,6 +30,8 @@ public class ArrowProjectile : MonoBehaviour
     [SerializeField, Min(0f)] private float gravityMultiplier = 1.35f;
     [Tooltip("Light air drag (Rigidbody.drag). ~0.05–0.15 bleeds speed over distance.")]
     [SerializeField, Min(0f)] private float airDrag = 0.08f;
+    [Tooltip("Nudge (meters) along the bounce normal so the tip clears the shield mesh.")]
+    [SerializeField, Min(0.02f)] private float shieldBounceClearance = 0.18f;
 
     [Header("Impact")]
     [Tooltip("Damage applied when this arrow hits a dragon (set from BowController on fire).")]
@@ -67,6 +69,7 @@ public class ArrowProjectile : MonoBehaviour
     private Vector3 lastAirVelocity = Vector3.forward;
     private Quaternion stuckRotation = Quaternion.identity;
     private bool dragonHitHandled;
+    private float ignoreDragonUntil;
     private static PhysicMaterial sharedNoBounceMaterial;
 
     /// <summary>
@@ -74,13 +77,73 @@ public class ArrowProjectile : MonoBehaviour
     /// </summary>
     public bool TryHandleDragonHit()
     {
-        if (dragonHitHandled)
+        if (dragonHitHandled || Time.time < ignoreDragonUntil)
         {
             return false;
         }
 
         dragonHitHandled = true;
         return true;
+    }
+
+    /// <summary>
+    /// Reflect off a surface (crystal shield) and keep flying.
+    /// </summary>
+    public void BounceOffSurface(Vector3 hitPoint, Vector3 outwardNormal, float speedRetain = 0.7f)
+    {
+        if (body == null || stuck || !flying)
+        {
+            return;
+        }
+
+        Vector3 n = outwardNormal.sqrMagnitude > 1e-6f
+            ? outwardNormal.normalized
+            : -TipWorldDirection;
+        Vector3 vel = body.velocity;
+        if (vel.sqrMagnitude < 0.05f)
+        {
+            vel = lastAirVelocity;
+        }
+
+        if (vel.sqrMagnitude < 0.05f)
+        {
+            vel = TipWorldDirection * 4f;
+        }
+
+        Vector3 reflected = Vector3.Reflect(vel, n);
+        // Guarantee we're leaving the surface (grazing hits can stay nearly parallel).
+        if (Vector3.Dot(reflected, n) < 1.5f)
+        {
+            reflected += n * 1.5f;
+        }
+
+        float retain = Mathf.Clamp(speedRetain, 0.15f, 1f);
+        float speed = Mathf.Max(2.5f, reflected.magnitude * retain);
+        Vector3 newVel = reflected.normalized * speed;
+
+        // Push tip clear of the shield so the next physics step doesn't re-hit.
+        float clearance = Mathf.Max(0.02f, shieldBounceClearance);
+        transform.position += n * clearance;
+        if (arrowTip != null)
+        {
+            Vector3 tipToHit = hitPoint - arrowTip.position;
+            if (Vector3.Dot(tipToHit, n) > 0f)
+            {
+                transform.position += n * tipToHit.magnitude;
+            }
+        }
+
+        body.velocity = newVel;
+        body.angularVelocity = Vector3.zero;
+        lastAirVelocity = newVel;
+        if (alignToVelocity)
+        {
+            transform.rotation = RotationForDirection(newVel);
+        }
+
+        // Brief cooldown so the bounce exit doesn't re-trigger the shield every frame.
+        dragonHitHandled = false;
+        ignoreDragonUntil = Time.time + 0.15f;
     }
 
     public Transform Tip => arrowTip;
@@ -259,7 +322,7 @@ public class ArrowProjectile : MonoBehaviour
     /// </summary>
     private void TryHitDragonPrecise(Vector3 velocity)
     {
-        if (stuck || !flying || dragonHitHandled)
+        if (stuck || !flying || dragonHitHandled || Time.time < ignoreDragonUntil)
         {
             return;
         }
@@ -456,6 +519,7 @@ public class ArrowProjectile : MonoBehaviour
 
         damage = Mathf.Max(1, shotDamage);
         dragonHitHandled = false;
+        ignoreDragonUntil = 0f;
         direction.Normalize();
         transform.SetParent(null, true);
         transform.rotation = RotationForDirection(direction);
