@@ -709,6 +709,14 @@ public class DragonBoss : MonoBehaviour
 
     private void ResetFightState(bool beginPlaying)
     {
+        // Pregame already flies the same path — snapping to spawn makes a one-frame
+        // teleport to the original pose before UpdateFlightMotion resumes.
+        bool keepCurrentFlightPose = beginPlaying
+            && phase == FightPhase.Waiting
+            && idleFlightWhileWaiting
+            && !dead
+            && !isDying;
+
         if (deathRoutine != null)
         {
             StopCoroutine(deathRoutine);
@@ -726,14 +734,22 @@ public class DragonBoss : MonoBehaviour
         nextFireballTime = Time.time + fireballFirstDelay;
         HideCreditsSigns();
 
-        transform.position = spawnPosition;
-        transform.rotation = spawnRotation;
-        RestoreBodyVisuals();
-        hasRootFlightSample = false;
-        flightVelocity = Vector3.zero;
-        lastRootPosition = spawnPosition;
+        if (!keepCurrentFlightPose)
+        {
+            transform.position = spawnPosition;
+            transform.rotation = spawnRotation;
+            hasRootFlightSample = false;
+            flightVelocity = Vector3.zero;
+            lastRootPosition = spawnPosition;
+        }
 
-        SetAnimatorRunning(false);
+        RestoreBodyVisuals();
+
+        if (!keepCurrentFlightPose)
+        {
+            SetAnimatorRunning(false);
+        }
+
         SetDragonCollidersEnabled(true);
 
         if (autoSetupHitCollider)
