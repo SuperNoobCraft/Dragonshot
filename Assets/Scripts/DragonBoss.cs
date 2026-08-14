@@ -530,6 +530,8 @@ public class DragonBoss : MonoBehaviour
         if (fightUI != null)
         {
             fightUI.Bind(this);
+            // Ensure the InfoUI HUD component exists even before the fight starts.
+            fightUI.EnsureInfoHudPublic();
         }
 
         if (equipStart == null && useEquipStart)

@@ -19,6 +19,8 @@ public class DragonFightUI : MonoBehaviour
 
     [Header("References")]
     [SerializeField] private DragonBoss dragon;
+    [Tooltip("Optional. Auto-added: top-left HUD under vGear/Frame/Info/InfoUI.")]
+    [SerializeField] private DragonFightInfoHud infoHud;
 
     [Header("Display")]
     [SerializeField] private TextMesh label;
@@ -58,6 +60,14 @@ public class DragonFightUI : MonoBehaviour
     [TextArea(2, 3)]
     [Tooltip("{0} = cause (e.g. Hit by fireball), {1} = difficulty")]
     [SerializeField] private string defeatText = "DEFEAT\n{0}\n{1}\nRESET";
+
+    [Header("Info HUD (vGear InfoUI)")]
+    [TextArea(2, 3)]
+    [Tooltip("Top-left InfoUI HUD while fighting. {0}=seconds left, {1}=current HP, {2}=max HP")]
+    [SerializeField] private string infoHudPlayingText = "TIME {0}\nHP {1}/{2}";
+    [TextArea(2, 3)]
+    [Tooltip("Top-left InfoUI HUD during overtime. {0}=current HP, {1}=max HP")]
+    [SerializeField] private string infoHudOvertimeText = "ENRAGED\nHP {0}/{1}";
 
     [Header("Interact")]
     [SerializeField] private bool instructionOnlyBeforeFight = true;
@@ -110,6 +120,8 @@ public class DragonFightUI : MonoBehaviour
 
         EnsureLabel();
         EnsureInteractable();
+        EnsureInfoHud();
+        HideInfoHud();
         Camera.onPostRender += DrawDefeatTint;
     }
 
@@ -171,6 +183,7 @@ public class DragonFightUI : MonoBehaviour
         allowResetDuringEquip = false;
         state = PanelState.Start;
         SetText(startPanelText);
+        HideInfoHud();
     }
 
     public void ShowEquipInstructions(string text)
@@ -180,6 +193,7 @@ public class DragonFightUI : MonoBehaviour
         allowResetDuringEquip = false;
         state = PanelState.Start;
         SetText(text);
+        HideInfoHud();
     }
 
     public void ShowEquipStep(int step)
@@ -202,6 +216,8 @@ public class DragonFightUI : MonoBehaviour
                 SetText(equipStep1PickUpBow);
                 break;
         }
+
+        HideInfoHud();
     }
 
     public void ShowTimer(float secondsRemaining, int hp, int maxHp)
@@ -212,6 +228,7 @@ public class DragonFightUI : MonoBehaviour
         state = PanelState.Playing;
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsRemaining));
         SetText(FormatTemplate(playingTimerText, whole, hp, maxHp, DifficultyLabel()));
+        EnsureInfoHud().ShowText(FormatTemplate(infoHudPlayingText, whole, hp, maxHp));
     }
 
     public void ShowTimer(float secondsRemaining)
@@ -226,6 +243,7 @@ public class DragonFightUI : MonoBehaviour
         allowResetDuringEquip = false;
         state = PanelState.Playing;
         SetText(FormatTemplate(overtimeTimerText, hp, maxHp, DifficultyLabel()));
+        EnsureInfoHud().ShowText(FormatTemplate(infoHudOvertimeText, hp, maxHp));
     }
 
     public void ShowVictory(float secondsLeft, bool usedScope = false)
@@ -236,6 +254,7 @@ public class DragonFightUI : MonoBehaviour
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsLeft));
         string template = usedScope ? victoryTextWithScope : victoryTextNoScope;
         SetText(FormatTemplate(template, whole, DifficultyLabel()));
+        HideInfoHud();
     }
 
     public void ShowTimeout()
@@ -244,6 +263,7 @@ public class DragonFightUI : MonoBehaviour
         allowResetDuringEquip = false;
         state = PanelState.Timeout;
         SetText(FormatTemplate(timeoutText, DifficultyLabel()));
+        HideInfoHud();
     }
 
     public void ShowDefeat(string cause = "Hit by fireball")
@@ -257,6 +277,41 @@ public class DragonFightUI : MonoBehaviour
 
         SetText(FormatTemplate(defeatText, cause, DifficultyLabel()));
         SetDefeatTint(true);
+        HideInfoHud();
+    }
+
+    private DragonFightInfoHud EnsureInfoHud()
+    {
+        if (infoHud == null)
+        {
+            infoHud = GetComponent<DragonFightInfoHud>();
+        }
+
+        if (infoHud == null)
+        {
+            infoHud = gameObject.AddComponent<DragonFightInfoHud>();
+        }
+
+        return infoHud;
+    }
+
+    /// <summary>Used by DragonBoss so the HUD starts hunting for InfoUI immediately.</summary>
+    public void EnsureInfoHudPublic()
+    {
+        EnsureInfoHud();
+    }
+
+    private void HideInfoHud()
+    {
+        if (infoHud == null)
+        {
+            infoHud = GetComponent<DragonFightInfoHud>();
+        }
+
+        if (infoHud != null)
+        {
+            infoHud.Hide();
+        }
     }
 
     private void SetDefeatTint(bool active)
