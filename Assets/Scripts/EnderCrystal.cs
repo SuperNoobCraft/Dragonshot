@@ -48,12 +48,16 @@ public class EnderCrystal : MonoBehaviour
     {
         None,
         HardRegrow,
-        RiseEmerge
+        RiseEmerge,
+        PracticeCageEmerge,
+        PracticeInnerEmerge
     }
 
     private LineRenderer beam;
     private bool destroyed;
     private bool combatActive = true;
+    private CrystalTargetPractice practiceGame;
+    private bool practicePreview;
     private GrowMode growMode = GrowMode.None;
     private float regenerateElapsed;
     private float regenerateDuration = 20f;
@@ -75,6 +79,420 @@ public class EnderCrystal : MonoBehaviour
     public bool IsDestroyed => destroyed;
     public bool IsRegenerating => growMode == GrowMode.HardRegrow;
     public bool IsEmerging => growMode != GrowMode.None;
+    public bool IsPracticePreview => practicePreview;
+
+    /// <summary>Runtime crystal for secret target practice (no dragon / shield).</summary>
+    public void BindForPractice(CrystalTargetPractice owner, bool preview)
+    {
+        practiceGame = owner;
+        dragon = null;
+        practicePreview = preview;
+
+        if (beam != null)
+        {
+            beam.enabled = false;
+        }
+
+        EnsureCrystalVisual();
+        ApplyPracticeLayer();
+    }
+
+    /// <summary>Hide inner and zero the cage immediately (call before the first frame renders).</summary>
+    public void PreparePracticeCageSpawnHidden()
+    {
+        EnsureCrystalVisual();
+        HideLegacyPlaceholders();
+        CachePartBaseScales();
+
+        if (crystalVisual != null && visualRoot != null && crystalVisual != visualRoot.gameObject)
+        {
+            crystalVisual.SetActive(false);
+        }
+
+        if (innerSpin != null)
+        {
+            innerSpin.gameObject.SetActive(false);
+        }
+
+        if (outerSpin != null)
+        {
+            outerSpin.gameObject.SetActive(false);
+            outerSpin.localScale = Vector3.zero;
+        }
+
+        if (visualRoot != null)
+        {
+            visualRoot.gameObject.SetActive(true);
+        }
+
+        Renderer[] renderers = GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            Renderer renderer = renderers[i];
+            if (renderer == null || renderer is LineRenderer)
+            {
+                continue;
+            }
+
+            renderer.enabled = false;
+        }
+
+        SetBeamVisible(false);
+        DisableHitColliders();
+    }
+
+    public void SetPracticePreview(bool preview)
+    {
+        practicePreview = preview;
+        EnsureCrystalVisual();
+        RefreshPracticeVisualState();
+    }
+
+    /// <summary>Re-sync preview / collider state after Start or visual build.</summary>
+    public void RefreshPracticeVisualState()
+    {
+        if (practiceGame == null)
+        {
+            return;
+        }
+
+        EnsureCrystalVisual();
+        ApplyPracticeLayer();
+
+        if (growMode == GrowMode.PracticeInnerEmerge || growMode == GrowMode.PracticeCageEmerge)
+        {
+            DisableHitColliders();
+            return;
+        }
+
+        ApplyPracticePreviewVisual(practicePreview);
+
+        if (practicePreview || growMode != GrowMode.None)
+        {
+            combatActive = false;
+            DisableHitColliders();
+            return;
+        }
+
+        combatActive = true;
+        EnsurePracticeHitCollider();
+    }
+
+    /// <summary>Finish emerge for practice crystals without registering on the dragon.</summary>
+    public void CompletePracticeEmerge()
+    {
+        growMode = GrowMode.None;
+        destroyed = false;
+        combatActive = true;
+        practicePreview = false;
+        ResetPartScales();
+        if (visualRoot != null)
+        {
+            visualRoot.localScale = Vector3.one * visualScale;
+        }
+
+        ApplyPracticePreviewVisual(false);
+        SetBeamVisible(false);
+        EnsurePracticeHitCollider();
+    }
+
+    /// <summary>
+    /// Ghost preview spawn: outer cage grows in (hard-mode shell phase, sped up).
+    /// </summary>
+    public void BeginPracticeCageEmerge()
+    {
+        practicePreview = true;
+        growMode = GrowMode.PracticeCageEmerge;
+        destroyed = false;
+        combatActive = false;
+        regenerateElapsed = 0f;
+
+        EnsureCrystalVisual();
+        CachePartBaseScales();
+
+        if (innerSpin != null)
+        {
+            innerSpin.gameObject.SetActive(false);
+        }
+
+        if (outerSpin != null)
+        {
+            outerSpin.gameObject.SetActive(true);
+            outerSpin.localScale = Vector3.zero;
+        }
+
+        SetBeamVisible(false);
+        DisableHitColliders();
+        ApplyPracticeLayer();
+    }
+
+    /// <param name="outer01">0 = invisible, 1 = full cage.</param>
+    public void SetPracticeCageEmergeProgress(float outer01)
+    {
+        if (growMode != GrowMode.PracticeCageEmerge)
+        {
+            return;
+        }
+
+        outer01 = Mathf.Clamp01(outer01);
+        regenerateElapsed = outer01;
+
+        if (innerSpin != null)
+        {
+            innerSpin.gameObject.SetActive(false);
+        }
+
+        if (outerSpin != null)
+        {
+            outerSpin.gameObject.SetActive(outer01 > 0.001f);
+            Vector3 baseScale = outerSpinBaseScale.sqrMagnitude > 0.0001f
+                ? outerSpinBaseScale
+                : Vector3.one;
+            outerSpin.localScale = baseScale * outer01;
+            SetPracticeOuterRenderersEnabled(outer01 > 0.001f);
+        }
+
+        SetBeamVisible(false);
+    }
+
+    /// <summary>Finish ghost cage grow — stays a non-hittable preview.</summary>
+    public void CompletePracticeCagePreview()
+    {
+        CompletePracticeCageShell(asPreview: true);
+    }
+
+    /// <summary>Cage at full size, inner hidden — ready for inner emerge or idle ghost.</summary>
+    public void CompletePracticeCageShell(bool asPreview)
+    {
+        growMode = GrowMode.None;
+        practicePreview = asPreview;
+        destroyed = false;
+        combatActive = false;
+
+        if (outerSpin != null)
+        {
+            outerSpin.gameObject.SetActive(true);
+            outerSpin.localScale = outerSpinBaseScale.sqrMagnitude > 0.0001f
+                ? outerSpinBaseScale
+                : Vector3.one;
+        }
+
+        if (innerSpin != null)
+        {
+            innerSpin.gameObject.SetActive(false);
+            SetPracticeInnerRenderersEnabled(false);
+        }
+
+        SetBeamVisible(false);
+        DisableHitColliders();
+        ApplyPracticeLayer();
+        SetPracticeOuterRenderersEnabled(true);
+    }
+
+    /// <summary>
+    /// Practice / ghost promote: cage already visible — only the inner orb grows in
+    /// (same idea as the inner phase of hard-mode regrow).
+    /// </summary>
+    public void BeginPracticeInnerEmerge()
+    {
+        practicePreview = false;
+        growMode = GrowMode.PracticeInnerEmerge;
+        destroyed = false;
+        combatActive = false;
+        regenerateElapsed = 0f;
+
+        EnsureCrystalVisual();
+        CachePartBaseScales();
+
+        if (outerSpin != null)
+        {
+            outerSpin.gameObject.SetActive(true);
+            outerSpin.localScale = outerSpinBaseScale.sqrMagnitude > 0.0001f
+                ? outerSpinBaseScale
+                : Vector3.one;
+        }
+
+        if (innerSpin != null)
+        {
+            innerSpin.gameObject.SetActive(true);
+            innerSpin.localScale = Vector3.zero;
+            SetPracticeInnerRenderersEnabled(false);
+        }
+
+        SetPracticeOuterRenderersEnabled(true);
+        SetBeamVisible(false);
+        DisableHitColliders();
+        ApplyPracticeLayer();
+    }
+
+    /// <param name="inner01">0 = cage only, 1 = full inner orb + core.</param>
+    public void SetPracticeInnerEmergeProgress(float inner01)
+    {
+        if (growMode != GrowMode.PracticeInnerEmerge)
+        {
+            return;
+        }
+
+        inner01 = Mathf.Clamp01(inner01);
+        regenerateElapsed = inner01;
+
+        if (outerSpin != null)
+        {
+            outerSpin.gameObject.SetActive(true);
+            outerSpin.localScale = outerSpinBaseScale.sqrMagnitude > 0.0001f
+                ? outerSpinBaseScale
+                : Vector3.one;
+        }
+
+        if (innerSpin != null)
+        {
+            innerSpin.gameObject.SetActive(inner01 > 0.001f);
+            innerSpin.localScale = (innerSpinBaseScale.sqrMagnitude > 0.0001f
+                ? innerSpinBaseScale
+                : Vector3.one) * inner01;
+            SetPracticeInnerRenderersEnabled(inner01 > 0.001f);
+        }
+
+        SetPracticeOuterRenderersEnabled(true);
+        SetBeamVisible(false);
+    }
+
+    private void SetPracticeOuterRenderersEnabled(bool enabled)
+    {
+        if (outerSpin == null)
+        {
+            return;
+        }
+
+        Renderer[] renderers = outerSpin.GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            if (renderers[i] != null)
+            {
+                renderers[i].enabled = enabled;
+            }
+        }
+    }
+
+    private void SetPracticeInnerRenderersEnabled(bool enabled)
+    {
+        if (innerSpin == null)
+        {
+            return;
+        }
+
+        Renderer[] renderers = innerSpin.GetComponentsInChildren<Renderer>(true);
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            if (renderers[i] != null)
+            {
+                renderers[i].enabled = enabled;
+            }
+        }
+    }
+
+    private void ApplyPracticePreviewVisual(bool preview)
+    {
+        if (visualRoot == null)
+        {
+            return;
+        }
+
+        if (preview)
+        {
+            // Ghost = outer cage only (no inner solid, core, or glowy outline).
+            if (innerSpin != null)
+            {
+                innerSpin.gameObject.SetActive(false);
+                SetPracticeInnerRenderersEnabled(false);
+            }
+
+            if (outerSpin != null)
+            {
+                outerSpin.gameObject.SetActive(true);
+                SetPracticeOuterRenderersEnabled(true);
+                Renderer[] outerRenderers = outerSpin.GetComponentsInChildren<Renderer>(true);
+                for (int i = 0; i < outerRenderers.Length; i++)
+                {
+                    if (outerRenderers[i] != null)
+                    {
+                        outerRenderers[i].enabled = true;
+                    }
+                }
+            }
+        }
+        else
+        {
+            if (innerSpin != null)
+            {
+                innerSpin.gameObject.SetActive(true);
+                SetPracticeInnerRenderersEnabled(true);
+            }
+
+            if (outerSpin != null)
+            {
+                outerSpin.gameObject.SetActive(true);
+                SetPracticeOuterRenderersEnabled(true);
+            }
+        }
+
+        visualRoot.gameObject.SetActive(true);
+    }
+
+    private static int ResolveArrowStickableLayer()
+    {
+        int layer = LayerMask.NameToLayer("ArrowStickable");
+        return layer >= 0 ? layer : 7;
+    }
+
+    private void ApplyPracticeLayer()
+    {
+        SetLayerRecursive(transform, ResolveArrowStickableLayer());
+    }
+
+    private static void SetLayerRecursive(Transform root, int layer)
+    {
+        if (root == null)
+        {
+            return;
+        }
+
+        root.gameObject.layer = layer;
+        for (int i = 0; i < root.childCount; i++)
+        {
+            SetLayerRecursive(root.GetChild(i), layer);
+        }
+    }
+
+    private void EnsurePracticeHitCollider()
+    {
+        hitCollider = GetComponent<SphereCollider>();
+        if (hitCollider == null)
+        {
+            hitCollider = gameObject.AddComponent<SphereCollider>();
+        }
+
+        if (hitCollider.radius < 0.35f)
+        {
+            hitCollider.radius = 0.55f;
+        }
+
+        // Match fight crystals: solid collider so arrows get OnCollisionEnter.
+        hitCollider.isTrigger = false;
+        hitCollider.enabled = true;
+        hitColliderBaseCenter = hitCollider.center;
+
+        // Cage build adds primitive colliders on some paths — keep only the root hittable.
+        Collider[] cols = GetComponentsInChildren<Collider>(true);
+        for (int i = 0; i < cols.Length; i++)
+        {
+            Collider col = cols[i];
+            if (col != null && col != hitCollider)
+            {
+                col.enabled = false;
+            }
+        }
+    }
 
     public void Bind(DragonBoss owner)
     {
@@ -121,11 +539,40 @@ public class EnderCrystal : MonoBehaviour
         }
     }
 
+    private void ReapplyPracticeGrowVisualState()
+    {
+        switch (growMode)
+        {
+            case GrowMode.PracticeCageEmerge:
+                SetPracticeCageEmergeProgress(regenerateElapsed);
+                break;
+            case GrowMode.PracticeInnerEmerge:
+                SetPracticeInnerEmergeProgress(regenerateElapsed);
+                break;
+            case GrowMode.None when practicePreview:
+                ApplyPracticePreviewVisual(true);
+                DisableHitColliders();
+                break;
+        }
+    }
+
     private void Start()
     {
         if (autoBuildVisual)
         {
             EnsureCrystalVisual();
+        }
+
+        if (practiceGame != null)
+        {
+            if (beam != null)
+            {
+                beam.enabled = false;
+            }
+
+            ApplyPracticeLayer();
+            ReapplyPracticeGrowVisualState();
+            return;
         }
 
         if (dragon != null)
@@ -148,6 +595,20 @@ public class EnderCrystal : MonoBehaviour
 
         if (growMode == GrowMode.RiseEmerge)
         {
+            TickEmergeSpin();
+            return;
+        }
+
+        if (growMode == GrowMode.PracticeInnerEmerge)
+        {
+            ApplyBob();
+            TickEmergeSpin();
+            return;
+        }
+
+        if (growMode == GrowMode.PracticeCageEmerge)
+        {
+            ApplyBob();
             TickEmergeSpin();
             return;
         }
@@ -194,7 +655,7 @@ public class EnderCrystal : MonoBehaviour
 
     private void LateUpdate()
     {
-        if (beam == null)
+        if (practiceGame != null || beam == null)
         {
             return;
         }
@@ -268,12 +729,29 @@ public class EnderCrystal : MonoBehaviour
 
     private void TryHit(Collider other)
     {
-        if (destroyed || other == null || !combatActive)
+        if (destroyed || other == null)
         {
             return;
         }
 
-        if (dragon != null && !dragon.IsFightActive)
+        if (practicePreview)
+        {
+            return;
+        }
+
+        if (practiceGame == null && !combatActive)
+        {
+            return;
+        }
+
+        if (practiceGame != null)
+        {
+            if (!practiceGame.IsPlaying)
+            {
+                return;
+            }
+        }
+        else if (dragon != null && !dragon.IsFightActive)
         {
             return;
         }
@@ -298,6 +776,14 @@ public class EnderCrystal : MonoBehaviour
         if (beam != null)
         {
             beam.enabled = false;
+        }
+
+        if (practiceGame != null)
+        {
+            practiceGame.NotifyCrystalHit(this);
+            SetCrystalActiveVisual(false);
+            Destroy(gameObject);
+            return;
         }
 
         if (dragon != null)
@@ -499,6 +985,11 @@ public class EnderCrystal : MonoBehaviour
 
         float overall;
         float innerFraction;
+        if (growMode == GrowMode.PracticeInnerEmerge)
+        {
+            return regenerateElapsed > 0.001f;
+        }
+
         if (growMode == GrowMode.HardRegrow)
         {
             overall = Mathf.Clamp01(regenerateElapsed / regenerateDuration);
@@ -733,7 +1224,7 @@ public class EnderCrystal : MonoBehaviour
 
         ownedMaterials.Clear();
 
-        if (!destroyed && dragon != null)
+        if (!destroyed && dragon != null && practiceGame == null)
         {
             dragon.NotifyCrystalDestroyed(this);
         }

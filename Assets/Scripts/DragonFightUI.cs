@@ -21,6 +21,8 @@ public class DragonFightUI : MonoBehaviour
     [SerializeField] private DragonBoss dragon;
     [Tooltip("Optional. Auto-added: top-left HUD under vGear/Frame/Info/InfoUI.")]
     [SerializeField] private DragonFightInfoHud infoHud;
+    [Tooltip("Secret crystal target practice (panel click before bow pick).")]
+    [SerializeField] private CrystalTargetPractice targetPractice;
 
     [Header("Display")]
     [SerializeField] private TextMesh label;
@@ -68,6 +70,23 @@ public class DragonFightUI : MonoBehaviour
     [TextArea(2, 3)]
     [Tooltip("Top-left InfoUI HUD during overtime. {0}=current HP, {1}=max HP")]
     [SerializeField] private string infoHudOvertimeText = "ENRAGED\nHP {0}/{1}";
+
+    [Header("Secret Target Practice")]
+    [TextArea(2, 3)]
+    [Tooltip("After secret panel click, before bow pickup. {0}=saved high score")]
+    [SerializeField] private string targetPracticeWaitingText =
+        "TARGET PRACTICE\nPick up the bow\n(no scope)\nBEST {0}";
+    [TextArea(2, 4)]
+    [Tooltip("World panel during practice. {0}=seconds left, {1}=score, {2}=high score")]
+    [SerializeField] private string targetPracticePlayingPanelText =
+        "TIME {0}\nSCORE {1}\nBEST {2}\n(click to reset)";
+    [TextArea(2, 4)]
+    [Tooltip("World panel when time runs out. {0}=score, {1}=high score")]
+    [SerializeField] private string targetPracticeResultsPanelText =
+        "TIME UP\nSCORE {0}\nBEST {1}\n(click to reset)";
+    [TextArea(2, 3)]
+    [Tooltip("Info HUD during practice. {0}=seconds left, {1}=score")]
+    [SerializeField] private string infoHudTargetPracticeText = "TIME {0}\nSCORE {1}";
 
     [Header("Interact")]
     [SerializeField] private bool instructionOnlyBeforeFight = true;
@@ -118,6 +137,11 @@ public class DragonFightUI : MonoBehaviour
             dragon = FindObjectOfType<DragonBoss>();
         }
 
+        if (targetPractice == null)
+        {
+            targetPractice = FindObjectOfType<CrystalTargetPractice>();
+        }
+
         EnsureLabel();
         EnsureInteractable();
         EnsureInfoHud();
@@ -140,10 +164,21 @@ public class DragonFightUI : MonoBehaviour
         if (dragon == null)
         {
             dragon = FindObjectOfType<DragonBoss>();
-            if (dragon == null)
+            if (dragon == null && (targetPractice == null || !targetPractice.IsActive))
             {
                 return;
             }
+        }
+
+        if (targetPractice == null)
+        {
+            targetPractice = FindObjectOfType<CrystalTargetPractice>();
+        }
+
+        if (instructionOnly && !allowResetDuringEquip && state == PanelState.Start)
+        {
+            HandleSecretPracticeClickInput();
+            return;
         }
 
         if (PlayEnvironment.IsDesktopInput)
@@ -174,6 +209,67 @@ public class DragonFightUI : MonoBehaviour
                 HandleClick();
             }
         }
+    }
+
+    private void HandleSecretPracticeClickInput()
+    {
+        if (targetPractice == null || !targetPractice.CanAcceptSecretEntry)
+        {
+            if (!PlayEnvironment.IsDesktopInput)
+            {
+                wasTriggerHeld = IsTriggerHeld();
+            }
+
+            return;
+        }
+
+        if (PlayEnvironment.IsDesktopInput)
+        {
+            if (Input.GetMouseButtonDown(0) && IsCursorOverPanel())
+            {
+                targetPractice.TryEnterFromSecretClick();
+            }
+        }
+        else
+        {
+            bool held = IsTriggerHeld();
+            bool pressed = held && !wasTriggerHeld;
+            wasTriggerHeld = held;
+            if (pressed && IsWandTargetingPanel())
+            {
+                targetPractice.TryEnterFromSecretClick();
+            }
+        }
+    }
+
+    public void ShowTargetPracticeWaiting(int bestScore)
+    {
+        SetDefeatTint(false);
+        instructionOnly = true;
+        allowResetDuringEquip = false;
+        state = PanelState.Start;
+        SetText(FormatTemplate(targetPracticeWaitingText, bestScore));
+        HideInfoHud();
+    }
+
+    public void ShowTargetPracticePlaying(int secondsRemaining, int currentScore, int bestScore)
+    {
+        SetDefeatTint(false);
+        instructionOnly = false;
+        allowResetDuringEquip = false;
+        state = PanelState.Playing;
+        SetText(FormatTemplate(targetPracticePlayingPanelText, secondsRemaining, currentScore, bestScore));
+        EnsureInfoHud().ShowText(FormatTemplate(infoHudTargetPracticeText, secondsRemaining, currentScore));
+    }
+
+    public void ShowTargetPracticeResults(int currentScore, int bestScore)
+    {
+        SetDefeatTint(false);
+        instructionOnly = false;
+        allowResetDuringEquip = false;
+        state = PanelState.Timeout;
+        SetText(FormatTemplate(targetPracticeResultsPanelText, currentScore, bestScore));
+        HideInfoHud();
     }
 
     public void ShowStart()
@@ -423,6 +519,12 @@ public class DragonFightUI : MonoBehaviour
 
     private void HandleClick()
     {
+        if (targetPractice != null && targetPractice.IsActive)
+        {
+            targetPractice.OnPanelClicked();
+            return;
+        }
+
         if (dragon == null)
         {
             return;

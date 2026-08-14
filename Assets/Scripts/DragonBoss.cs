@@ -106,6 +106,8 @@ public class DragonBoss : MonoBehaviour
     [SerializeField, Min(0.1f)] private float crystalExplosionRadius = 1.8f;
     [Tooltip("HP removed when a crystal explodes with the dragon inside Crystal Explosion Radius. Works while shielded.")]
     [SerializeField, Min(1)] private int crystalExplosionDamage = 1;
+    [Tooltip("HP removed when a fireball is shot down and explodes with the dragon in blast radius. Works while shielded.")]
+    [SerializeField, Min(1)] private int fireballExplosionDamage = 1;
 
     [Header("Death")]
     [Tooltip("Seconds of slow continued flight with light rays before the final explosion.")]
@@ -253,6 +255,7 @@ public class DragonBoss : MonoBehaviour
     private bool isDying;
     private float damageFlashEndTime;
     private Coroutine deathRoutine;
+    private GameObject deathRayRoot;
     private Vector3 visualScaleRootBaseScale;
     private float nextFireballTime;
     private float nextHitColliderBakeTime;
@@ -434,12 +437,36 @@ public class DragonBoss : MonoBehaviour
     /// </summary>
     public void TryDamageFromCrystalExplosion(Vector3 explosionOrigin)
     {
-        if (!IsFightActive || crystalExplosionDamage <= 0)
+        TryExplosionDamage(
+            explosionOrigin,
+            CrystalExplosionRadius,
+            crystalExplosionDamage,
+            "crystal explosion");
+    }
+
+    /// <summary>
+    /// Arrow-destroyed fireball blast damages the dragon through the shield if the body is in range.
+    /// </summary>
+    public void TryDamageFromFireballExplosion(Vector3 explosionOrigin, float radius)
+    {
+        TryExplosionDamage(
+            explosionOrigin,
+            radius,
+            fireballExplosionDamage,
+            "fireball explosion");
+    }
+
+    private void TryExplosionDamage(
+        Vector3 explosionOrigin,
+        float radius,
+        int damage,
+        string sourceLabel)
+    {
+        if (!IsFightActive || damage <= 0)
         {
             return;
         }
 
-        float radius = CrystalExplosionRadius;
         if (radius <= 0f || !IsPointWithinBodyRange(explosionOrigin, radius))
         {
             return;
@@ -448,13 +475,13 @@ public class DragonBoss : MonoBehaviour
         if (logStateChanges)
         {
             Debug.Log(
-                "DragonBoss: crystal explosion hit (r=" + radius
-                + ", dmg=" + crystalExplosionDamage
+                "DragonBoss: " + sourceLabel + " hit (r=" + radius
+                + ", dmg=" + damage
                 + ", shielded=" + IsShielded + ").",
                 this);
         }
 
-        TakeDamage(crystalExplosionDamage);
+        TakeDamage(damage);
     }
 
     private bool IsPointWithinBodyRange(Vector3 worldPoint, float radius)
@@ -671,6 +698,7 @@ public class DragonBoss : MonoBehaviour
     private void OnDestroy()
     {
         ClearAnimatedHitColliders();
+        CleanupDeathSequenceArtifacts();
     }
 
     /// <summary>Begin a timed fight from the world-space Start panel.</summary>
@@ -722,6 +750,8 @@ public class DragonBoss : MonoBehaviour
             StopCoroutine(deathRoutine);
             deathRoutine = null;
         }
+
+        CleanupDeathSequenceArtifacts();
 
         isDying = false;
         dead = false;
@@ -1299,9 +1329,26 @@ public class DragonBoss : MonoBehaviour
         if (deathRoutine != null)
         {
             StopCoroutine(deathRoutine);
+            deathRoutine = null;
         }
 
+        CleanupDeathSequenceArtifacts();
         deathRoutine = StartCoroutine(DeathFlyAndExplodeRoutine());
+    }
+
+    private void CleanupDeathSequenceArtifacts()
+    {
+        if (deathRayRoot != null)
+        {
+            Destroy(deathRayRoot);
+            deathRayRoot = null;
+        }
+
+        // Death glow / shrink may have altered materials or hidden the mesh.
+        RestoreBodyVisuals();
+
+        // Coast-phase death audio — waiting idle flight will re-enable if needed.
+        FightAudio.SetDragonFlying(false);
     }
 
     private IEnumerator DeathFlyAndExplodeRoutine()
@@ -1320,7 +1367,8 @@ public class DragonBoss : MonoBehaviour
         coastHeading.Normalize();
 
         float coastSpeed = Mathf.Max(0.75f, EstimateFlightSpeed() * deathFlySpeedMultiplier);
-        GameObject rayRoot = BuildDeathRayBurst(out Light deathLight, out List<DeathRay> rays);
+        deathRayRoot = BuildDeathRayBurst(out Light deathLight, out List<DeathRay> rays);
+        GameObject rayRoot = deathRayRoot;
         float flyDuration = Mathf.Max(0.35f, deathFlySeconds);
         float elapsed = 0f;
 
@@ -1365,6 +1413,10 @@ public class DragonBoss : MonoBehaviour
         if (rayRoot != null)
         {
             Destroy(rayRoot);
+            if (deathRayRoot == rayRoot)
+            {
+                deathRayRoot = null;
+            }
         }
 
         FightAudio.SetDragonFlying(false);

@@ -59,6 +59,8 @@ public class DragonFightEquipStart : MonoBehaviour
     [Tooltip("Legacy single reference: used as ground and/or held quiver if the fields above are empty.")]
     [SerializeField] private Transform groundQuiver;
     [SerializeField] private DragonFightUI fightUI;
+    [Tooltip("Secret crystal target practice (panel click before bow pick).")]
+    [SerializeField] private CrystalTargetPractice targetPractice;
     [Tooltip("World-space instruction signs that rise for equip and sink when the fight begins.")]
     [SerializeField] private GameObject[] instructionSigns;
     [Tooltip("How far below rest height signs bury (meters).")]
@@ -162,12 +164,14 @@ public class DragonFightEquipStart : MonoBehaviour
     private bool groundPosesCached;
     private bool startedFight;
     private bool quiverHeld;
+    private bool targetPracticeActive;
     private int selectedQuiverIndex = -1;
     private int selectedBowIndex = -1;
     private FightDifficulty selectedDifficulty = FightDifficulty.Normal;
 
     public bool IsBowEquipped => phase != EquipPhase.NeedBow;
     public bool IsQuiverMounted => phase == EquipPhase.Complete;
+    public bool IsTargetPracticeActive => targetPracticeActive;
     public FightDifficulty SelectedDifficulty => selectedDifficulty;
 
     /// <summary>
@@ -342,6 +346,12 @@ public class DragonFightEquipStart : MonoBehaviour
 
     public void ResetForWaiting()
     {
+        if (targetPractice != null && targetPractice.IsActive)
+        {
+            targetPractice.ForceStopWithoutEquipReset();
+        }
+
+        targetPracticeActive = false;
         ResolveReferences();
         EnsureDifficultyQuiversMigrated();
         EnsureGroundBowsMigrated();
@@ -374,6 +384,34 @@ public class DragonFightEquipStart : MonoBehaviour
         SetInstructionSignsVisible(true);
         SetCreditsSignsVisible(false);
         RefreshInstructionsIfNeeded();
+    }
+
+    /// <summary>Secret target practice: no dragon, no scope bow; Normal quiver only after bow.</summary>
+    public void EnterTargetPracticeMode()
+    {
+        targetPracticeActive = true;
+        phase = EquipPhase.NeedBow;
+        lastInstructionPhase = (EquipPhase)(-1);
+        dwell = 0f;
+        selectedBowIndex = -1;
+        selectedQuiverIndex = -1;
+        quiverHeld = false;
+        startedFight = false;
+
+        SetPlayableBowEquipped(false);
+        ApplyScopeFromBowChoice(false);
+        ShowNoScopeGroundBowsOnly();
+        HideAllGroundQuivers();
+        HideDifficultyLabels();
+        HideHeldQuiver();
+        ResetScopePickups();
+        if (bow != null)
+        {
+            bow.SetQuiverMountedOnBack(false);
+        }
+
+        SetInstructionSignsVisible(false);
+        SetCreditsSignsVisible(false);
     }
 
     /// <summary>Rise credits signs after victory (dragon exploded).</summary>
@@ -510,6 +548,11 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void TryDesktopPickBow(bool withScope)
     {
+        if (targetPracticeActive && withScope)
+        {
+            return;
+        }
+
         if (phase != EquipPhase.NeedBow)
         {
             return;
@@ -529,6 +572,11 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void TryDesktopPickDifficulty(FightDifficulty difficulty)
     {
+        if (targetPracticeActive && difficulty != FightDifficulty.Normal)
+        {
+            return;
+        }
+
         int index = IndexOfDifficulty(difficulty);
         if (index < 0 || phase != EquipPhase.NeedQuiverPickup)
         {
@@ -545,8 +593,18 @@ public class DragonFightEquipStart : MonoBehaviour
             return;
         }
 
+        if (targetPracticeActive)
+        {
+            if (groundBows[index].withScope)
+            {
+                return;
+            }
+        }
+
         selectedBowIndex = index;
-        bool withScope = groundBows[index] != null && groundBows[index].withScope;
+        bool withScope = !targetPracticeActive
+            && groundBows[index] != null
+            && groundBows[index].withScope;
 
         SetPlayableBowEquipped(true);
         ApplyScopeFromBowChoice(withScope);
@@ -557,8 +615,16 @@ public class DragonFightEquipStart : MonoBehaviour
         phase = EquipPhase.NeedQuiverPickup;
         lastInstructionPhase = (EquipPhase)(-1);
 
-        ShowAllGroundQuivers();
-        ShowDifficultyLabels();
+        if (targetPracticeActive)
+        {
+            ShowNormalGroundQuiverOnly();
+        }
+        else
+        {
+            ShowAllGroundQuivers();
+            ShowDifficultyLabels();
+        }
+
         FightAudio.PlayEquipBow(transform.position);
         if (withScope)
         {
@@ -573,6 +639,15 @@ public class DragonFightEquipStart : MonoBehaviour
         if (!IsValidQuiverIndex(index) || phase != EquipPhase.NeedQuiverPickup)
         {
             return;
+        }
+
+        if (targetPracticeActive)
+        {
+            int normalIndex = IndexOfDifficulty(FightDifficulty.Normal);
+            if (normalIndex >= 0 && index != normalIndex)
+            {
+                return;
+            }
         }
 
         selectedQuiverIndex = index;
@@ -657,7 +732,7 @@ public class DragonFightEquipStart : MonoBehaviour
             selectedDifficulty = difficultyQuivers[selectedQuiverIndex].difficulty;
         }
 
-        if (dragon != null)
+        if (dragon != null && !targetPracticeActive)
         {
             dragon.SetDifficulty(selectedDifficulty);
         }
@@ -759,7 +834,25 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void TryStartFight()
     {
-        if (startedFight || dragon == null || !dragon.IsWaitingForStart)
+        if (startedFight)
+        {
+            return;
+        }
+
+        if (targetPracticeActive)
+        {
+            if (targetPractice == null)
+            {
+                return;
+            }
+
+            startedFight = true;
+            SetInstructionSignsVisible(false);
+            targetPractice.OnQuiverMounted();
+            return;
+        }
+
+        if (dragon == null || !dragon.IsWaitingForStart)
         {
             return;
         }
@@ -809,6 +902,34 @@ public class DragonFightEquipStart : MonoBehaviour
         for (int i = 0; i < GroundBowCount; i++)
         {
             PlaceBowOnGround(i);
+        }
+    }
+
+    private void ShowNoScopeGroundBowsOnly()
+    {
+        for (int i = 0; i < GroundBowCount; i++)
+        {
+            if (!IsValidBowIndex(i))
+            {
+                continue;
+            }
+
+            bool show = !groundBows[i].withScope;
+            GameObject prop = groundBows[i].groundVisual;
+            if (prop != null)
+            {
+                prop.SetActive(show);
+            }
+
+            if (groundBows[i].label != null)
+            {
+                groundBows[i].label.SetActive(show);
+            }
+
+            if (show)
+            {
+                PlaceBowOnGround(i);
+            }
         }
     }
 
@@ -936,6 +1057,31 @@ public class DragonFightEquipStart : MonoBehaviour
         for (int i = 0; i < DifficultyQuiverCount; i++)
         {
             PlaceQuiverOnGround(i);
+        }
+    }
+
+    private void ShowNormalGroundQuiverOnly()
+    {
+        int normalIndex = IndexOfDifficulty(FightDifficulty.Normal);
+        CacheLabelPosesIfNeeded();
+
+        for (int i = 0; i < DifficultyQuiverCount; i++)
+        {
+            GameObject prop = GetQuiverGroundObject(i);
+            bool show = i == normalIndex && IsValidQuiverIndex(i);
+            if (prop != null)
+            {
+                if (show)
+                {
+                    PlaceQuiverOnGround(i);
+                }
+                else
+                {
+                    prop.SetActive(false);
+                }
+            }
+
+            SetDifficultyLabelVisible(i, show);
         }
     }
 
@@ -1726,6 +1872,11 @@ public class DragonFightEquipStart : MonoBehaviour
 
         for (int i = 0; i < GroundBowCount; i++)
         {
+            if (targetPracticeActive && IsValidBowIndex(i) && groundBows[i].withScope)
+            {
+                continue;
+            }
+
             GameObject prop = GetBowGroundObject(i);
             if (prop == null || !prop.activeInHierarchy)
             {
@@ -1875,6 +2026,12 @@ public class DragonFightEquipStart : MonoBehaviour
     private void RefreshInstructionsIfNeeded()
     {
         if (fightUI == null || phase == lastInstructionPhase)
+        {
+            return;
+        }
+
+        // Waiting-for-bow copy is owned by CrystalTargetPractice.
+        if (targetPracticeActive && phase == EquipPhase.NeedBow)
         {
             return;
         }
@@ -2285,6 +2442,11 @@ public class DragonFightEquipStart : MonoBehaviour
         if (fightUI == null)
         {
             fightUI = FindObjectOfType<DragonFightUI>();
+        }
+
+        if (targetPractice == null)
+        {
+            targetPractice = FindObjectOfType<CrystalTargetPractice>();
         }
     }
 

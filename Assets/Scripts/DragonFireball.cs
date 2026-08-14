@@ -554,6 +554,11 @@ public class DragonFireball : MonoBehaviour
         FightAudio.PlayFireballExplode(blastPos);
 
         DragonBoss boss = owner;
+        if (destroyedByArrow && boss != null)
+        {
+            boss.TryDamageFromFireballExplosion(blastPos, settings.explodeRadius);
+        }
+
         bool defeat = hitPlayer && !destroyedByArrow && boss != null && boss.IsFightActive;
 
         if (owner != null)

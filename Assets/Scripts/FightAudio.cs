@@ -62,20 +62,85 @@ public class FightAudio : MonoBehaviour
 
     private bool flyingActive;
     private float nextFlapTime;
+    private Transform playbackHost;
+    private bool playbackReparented;
 
     public static FightAudio Resolve()
     {
+        if (Instance != null && Instance.isActiveAndEnabled)
+        {
+            return Instance;
+        }
+
         if (Instance != null)
         {
             return Instance;
         }
 
 #if UNITY_2023_1_OR_NEWER
-        Instance = FindFirstObjectByType<FightAudio>();
+        Instance = FindFirstObjectByType<FightAudio>(FindObjectsInactive.Include);
 #else
-        Instance = FindObjectOfType<FightAudio>();
+        FightAudio[] all = Resources.FindObjectsOfTypeAll<FightAudio>();
+        for (int i = 0; i < all.Length; i++)
+        {
+            FightAudio candidate = all[i];
+            if (candidate == null || candidate.gameObject.scene.IsValid() == false)
+            {
+                continue;
+            }
+
+            Instance = candidate;
+            break;
+        }
 #endif
         return Instance;
+    }
+
+    /// <summary>
+    /// Keep SFX sources on an active transform while the dragon GameObject is disabled
+    /// (e.g. secret crystal target practice).
+    /// </summary>
+    public void ReparentPlaybackTo(Transform host)
+    {
+        if (host == null)
+        {
+            return;
+        }
+
+        EnsureSource();
+        playbackHost = host;
+        playbackReparented = true;
+
+        if (sfxSource != null)
+        {
+            sfxSource.transform.SetParent(host, true);
+        }
+
+        if (bowDrawSource != null)
+        {
+            bowDrawSource.transform.SetParent(host, true);
+        }
+    }
+
+    public void RestorePlaybackParent()
+    {
+        if (!playbackReparented)
+        {
+            return;
+        }
+
+        if (sfxSource != null)
+        {
+            sfxSource.transform.SetParent(transform, false);
+        }
+
+        if (bowDrawSource != null)
+        {
+            bowDrawSource.transform.SetParent(transform, false);
+        }
+
+        playbackHost = null;
+        playbackReparented = false;
     }
 
     private void Awake()
