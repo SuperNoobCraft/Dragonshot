@@ -65,6 +65,18 @@ public class CrystalPillarRiseSettings : MonoBehaviour
         return crystalWorldY - crystalOffsetFromPillarY;
     }
 
+    /// <summary>Crystal world Y − pillar pivot Y at the captured rest pose.</summary>
+    public float CrystalOffsetFromPillarY
+    {
+        get
+        {
+            EnsureRestPose();
+            return crystalOffsetFromPillarY;
+        }
+    }
+
+    public float BuriedDepthBelowCrystal => Mathf.Abs(buriedDepthBelowCrystal);
+
     public float BuriedPillarWorldY => PillarYForCrystalY(BuriedCrystalWorldY);
 
     public float PickRandomPeakPillarWorldY()

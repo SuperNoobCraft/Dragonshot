@@ -8,13 +8,6 @@ using Votanic.vXR.vCast;
 [RequireComponent(typeof(Collider))]
 public class TargetPracticeUI : MonoBehaviour
 {
-    public enum PanelState
-    {
-        Start,
-        Playing,
-        Results
-    }
-
     [Header("Display")]
     [SerializeField] private TextMesh label;
     [SerializeField] private float characterSize = 0.08f;
@@ -28,7 +21,6 @@ public class TargetPracticeUI : MonoBehaviour
     [SerializeField] private int maxButtonsToScan = 16;
 
     private TargetPracticeGame game;
-    private PanelState state = PanelState.Start;
     private bool wasTriggerHeld;
     private string cachedText = "Shoot the center\ntarget to start";
 
@@ -74,20 +66,17 @@ public class TargetPracticeUI : MonoBehaviour
 
     public void ShowStart()
     {
-        state = PanelState.Start;
         SetText("Shoot the center\ntarget to start");
     }
 
     public void ShowTimer(float secondsRemaining, int score)
     {
-        state = PanelState.Playing;
         int whole = Mathf.CeilToInt(Mathf.Max(0f, secondsRemaining));
         SetText("Time " + whole + "\nScore " + score);
     }
 
     public void ShowResults(int score, bool showRetryPrompt = true)
     {
-        state = PanelState.Results;
         if (showRetryPrompt)
         {
             SetText("Score " + score + "\nShoot center target\nto try again");

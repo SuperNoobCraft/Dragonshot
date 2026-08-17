@@ -1,3 +1,4 @@
+using System.Collections;
 using UnityEngine;
 using Votanic.vXR.vCast;
 
@@ -87,6 +88,14 @@ public class DragonFightEquipStart : MonoBehaviour
     [Tooltip("Desktop: also allow pickup when the view camera is near the prop.")]
     [SerializeField] private bool desktopProximityPickup = true;
 
+    [Header("Appear Timing")]
+    [Tooltip("After bow pickup, wait this long before quivers appear.")]
+    [SerializeField, Min(0f)] private float quiverAppearDelayAfterBow = 0.5f;
+    [Tooltip("After quivers appear, wait this long before they can be picked up.")]
+    [SerializeField, Min(0f)] private float quiverPickupDelayAfterAppear = 0.5f;
+    [Tooltip("Scale-from-zero appear animation length for bows / quivers.")]
+    [SerializeField, Min(0.05f)] private float propAppearScaleSeconds = 0.28f;
+
     [Header("Quiver Attach")]
     [SerializeField] private Vector3 quiverHandLocalPosition = new Vector3(0.06f, -0.04f, 0.12f);
     [SerializeField] private Vector3 quiverHandLocalEuler = new Vector3(15f, 0f, -20f);
@@ -165,6 +174,10 @@ public class DragonFightEquipStart : MonoBehaviour
     private bool startedFight;
     private bool quiverHeld;
     private bool targetPracticeActive;
+    private bool quiverPickupUnlocked;
+    private Coroutine quiverRevealRoutine;
+    private readonly System.Collections.Generic.Dictionary<Transform, Vector3> propBaseScales =
+        new System.Collections.Generic.Dictionary<Transform, Vector3>(8);
     private int selectedQuiverIndex = -1;
     private int selectedBowIndex = -1;
     private FightDifficulty selectedDifficulty = FightDifficulty.Normal;
@@ -360,6 +373,8 @@ public class DragonFightEquipStart : MonoBehaviour
         ResetIdleSpinAngles();
         startedFight = false;
         quiverHeld = false;
+        quiverPickupUnlocked = false;
+        StopQuiverRevealRoutine();
         selectedQuiverIndex = -1;
         selectedBowIndex = -1;
         selectedDifficulty = FightDifficulty.Normal;
@@ -369,7 +384,7 @@ public class DragonFightEquipStart : MonoBehaviour
 
         SetPlayableBowEquipped(false);
         ApplyScopeFromBowChoice(false);
-        ShowAllGroundBows();
+        ShowAllGroundBows(animateAppear: true);
         ShowBowLabels();
         // Quivers stay hidden until a bow is equipped.
         HideAllGroundQuivers();
@@ -400,11 +415,13 @@ public class DragonFightEquipStart : MonoBehaviour
 
         SetPlayableBowEquipped(false);
         ApplyScopeFromBowChoice(false);
-        ShowNoScopeGroundBowsOnly();
+        ShowNoScopeGroundBowsOnly(animateAppear: true);
         HideAllGroundQuivers();
         HideDifficultyLabels();
         HideHeldQuiver();
         ResetScopePickups();
+        quiverPickupUnlocked = false;
+        StopQuiverRevealRoutine();
         if (bow != null)
         {
             bow.SetQuiverMountedOnBack(false);
@@ -448,6 +465,12 @@ public class DragonFightEquipStart : MonoBehaviour
                 break;
 
             case EquipPhase.NeedQuiverPickup:
+                if (!quiverPickupUnlocked)
+                {
+                    dwell = 0f;
+                    break;
+                }
+
                 int nearIndex = FindNearestGroundQuiverIndex();
                 if (nearIndex >= 0)
                 {
@@ -513,6 +536,11 @@ public class DragonFightEquipStart : MonoBehaviour
 
         if (phase == EquipPhase.NeedQuiverPickup || phase == EquipPhase.NeedQuiverBack)
         {
+            if (phase == EquipPhase.NeedQuiverPickup && !quiverPickupUnlocked)
+            {
+                return;
+            }
+
             if (phase == EquipPhase.NeedQuiverPickup && Input.GetKeyDown(desktopPickEasyKey))
             {
                 TryDesktopPickDifficulty(FightDifficulty.Easy);
@@ -614,16 +642,11 @@ public class DragonFightEquipStart : MonoBehaviour
         dwell = 0f;
         phase = EquipPhase.NeedQuiverPickup;
         lastInstructionPhase = (EquipPhase)(-1);
-
-        if (targetPracticeActive)
-        {
-            ShowNormalGroundQuiverOnly();
-        }
-        else
-        {
-            ShowAllGroundQuivers();
-            ShowDifficultyLabels();
-        }
+        quiverPickupUnlocked = false;
+        StopQuiverRevealRoutine();
+        HideAllGroundQuivers();
+        HideDifficultyLabels();
+        quiverRevealRoutine = StartCoroutine(RevealQuiversAfterBowRoutine());
 
         FightAudio.PlayEquipBow(transform.position);
         if (withScope)
@@ -634,9 +657,54 @@ public class DragonFightEquipStart : MonoBehaviour
         RefreshInstructionsIfNeeded();
     }
 
+    private IEnumerator RevealQuiversAfterBowRoutine()
+    {
+        if (quiverAppearDelayAfterBow > 0f)
+        {
+            yield return new WaitForSeconds(quiverAppearDelayAfterBow);
+        }
+
+        if (phase != EquipPhase.NeedQuiverPickup)
+        {
+            quiverRevealRoutine = null;
+            yield break;
+        }
+
+        if (targetPracticeActive)
+        {
+            ShowNormalGroundQuiverOnly(animateAppear: true);
+        }
+        else
+        {
+            ShowAllGroundQuivers(animateAppear: true);
+            ShowDifficultyLabels();
+        }
+
+        if (quiverPickupDelayAfterAppear > 0f)
+        {
+            yield return new WaitForSeconds(quiverPickupDelayAfterAppear);
+        }
+
+        if (phase == EquipPhase.NeedQuiverPickup)
+        {
+            quiverPickupUnlocked = true;
+        }
+
+        quiverRevealRoutine = null;
+    }
+
+    private void StopQuiverRevealRoutine()
+    {
+        if (quiverRevealRoutine != null)
+        {
+            StopCoroutine(quiverRevealRoutine);
+            quiverRevealRoutine = null;
+        }
+    }
+
     private void PickupQuiver(int index)
     {
-        if (!IsValidQuiverIndex(index) || phase != EquipPhase.NeedQuiverPickup)
+        if (!IsValidQuiverIndex(index) || phase != EquipPhase.NeedQuiverPickup || !quiverPickupUnlocked)
         {
             return;
         }
@@ -680,6 +748,7 @@ public class DragonFightEquipStart : MonoBehaviour
         }
 
         mobile.gameObject.SetActive(true);
+        RestorePropBaseScale(mobile);
         Transform attach = ResolveQuiverHandAttach();
         if (attach != null)
         {
@@ -897,15 +966,15 @@ public class DragonFightEquipStart : MonoBehaviour
         ShowAllGroundBows();
     }
 
-    private void ShowAllGroundBows()
+    private void ShowAllGroundBows(bool animateAppear = false)
     {
         for (int i = 0; i < GroundBowCount; i++)
         {
-            PlaceBowOnGround(i);
+            PlaceBowOnGround(i, animateAppear);
         }
     }
 
-    private void ShowNoScopeGroundBowsOnly()
+    private void ShowNoScopeGroundBowsOnly(bool animateAppear = false)
     {
         for (int i = 0; i < GroundBowCount; i++)
         {
@@ -918,17 +987,19 @@ public class DragonFightEquipStart : MonoBehaviour
             GameObject prop = groundBows[i].groundVisual;
             if (prop != null)
             {
-                prop.SetActive(show);
+                if (show)
+                {
+                    PlaceBowOnGround(i, animateAppear);
+                }
+                else
+                {
+                    prop.SetActive(false);
+                }
             }
 
             if (groundBows[i].label != null)
             {
                 groundBows[i].label.SetActive(show);
-            }
-
-            if (show)
-            {
-                PlaceBowOnGround(i);
             }
         }
     }
@@ -950,11 +1021,12 @@ public class DragonFightEquipStart : MonoBehaviour
                 prop.transform.SetPositionAndRotation(pose.position, pose.rotation);
             }
 
+            RestorePropBaseScale(prop.transform);
             prop.SetActive(false);
         }
     }
 
-    private void PlaceBowOnGround(int index)
+    private void PlaceBowOnGround(int index, bool animateAppear = false)
     {
         GameObject prop = GetBowGroundObject(index);
         if (prop == null)
@@ -970,6 +1042,14 @@ public class DragonFightEquipStart : MonoBehaviour
         }
 
         prop.SetActive(true);
+        if (animateAppear)
+        {
+            BeginPropAppearScale(prop.transform);
+        }
+        else
+        {
+            RestorePropBaseScale(prop.transform);
+        }
     }
 
     private void ShowBowLabels()
@@ -1052,15 +1132,15 @@ public class DragonFightEquipStart : MonoBehaviour
         t.localRotation = pose.localRotation;
     }
 
-    private void ShowAllGroundQuivers()
+    private void ShowAllGroundQuivers(bool animateAppear = false)
     {
         for (int i = 0; i < DifficultyQuiverCount; i++)
         {
-            PlaceQuiverOnGround(i);
+            PlaceQuiverOnGround(i, animateAppear);
         }
     }
 
-    private void ShowNormalGroundQuiverOnly()
+    private void ShowNormalGroundQuiverOnly(bool animateAppear = false)
     {
         int normalIndex = IndexOfDifficulty(FightDifficulty.Normal);
         CacheLabelPosesIfNeeded();
@@ -1073,10 +1153,11 @@ public class DragonFightEquipStart : MonoBehaviour
             {
                 if (show)
                 {
-                    PlaceQuiverOnGround(i);
+                    PlaceQuiverOnGround(i, animateAppear);
                 }
                 else
                 {
+                    RestorePropBaseScale(prop.transform);
                     prop.SetActive(false);
                 }
             }
@@ -1099,12 +1180,13 @@ public class DragonFightEquipStart : MonoBehaviour
                     prop.transform.SetPositionAndRotation(pose.position, pose.rotation);
                 }
 
+                RestorePropBaseScale(prop.transform);
                 prop.SetActive(false);
             }
         }
     }
 
-    private void PlaceQuiverOnGround(int index)
+    private void PlaceQuiverOnGround(int index, bool animateAppear = false)
     {
         GameObject prop = GetQuiverGroundObject(index);
         if (prop == null)
@@ -1136,6 +1218,87 @@ public class DragonFightEquipStart : MonoBehaviour
         }
 
         prop.SetActive(true);
+        if (animateAppear)
+        {
+            BeginPropAppearScale(prop.transform);
+        }
+        else
+        {
+            RestorePropBaseScale(prop.transform);
+        }
+    }
+
+    private void BeginPropAppearScale(Transform prop)
+    {
+        if (prop == null)
+        {
+            return;
+        }
+
+        CachePropBaseScale(prop);
+        Vector3 target = propBaseScales[prop];
+        prop.localScale = Vector3.one * 0.001f;
+        StartCoroutine(AnimatePropAppearScale(prop, target));
+    }
+
+    private IEnumerator AnimatePropAppearScale(Transform prop, Vector3 target)
+    {
+        if (prop == null)
+        {
+            yield break;
+        }
+
+        float duration = Mathf.Max(0.05f, propAppearScaleSeconds);
+        float elapsed = 0f;
+        while (elapsed < duration)
+        {
+            if (prop == null)
+            {
+                yield break;
+            }
+
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / duration);
+            // Ease out so it pops in quickly then settles.
+            t = 1f - (1f - t) * (1f - t);
+            prop.localScale = Vector3.LerpUnclamped(Vector3.one * 0.001f, target, t);
+            yield return null;
+        }
+
+        if (prop != null)
+        {
+            prop.localScale = target;
+        }
+    }
+
+    private void CachePropBaseScale(Transform prop)
+    {
+        if (prop == null)
+        {
+            return;
+        }
+
+        if (!propBaseScales.ContainsKey(prop))
+        {
+            Vector3 scale = prop.localScale;
+            if (scale.sqrMagnitude < 1e-6f)
+            {
+                scale = Vector3.one;
+            }
+
+            propBaseScales[prop] = scale;
+        }
+    }
+
+    private void RestorePropBaseScale(Transform prop)
+    {
+        if (prop == null)
+        {
+            return;
+        }
+
+        CachePropBaseScale(prop);
+        prop.localScale = propBaseScales[prop];
     }
 
     private void HideUnselectedQuiversAndLabels(int keepIndex)

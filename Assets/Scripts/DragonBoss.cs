@@ -125,18 +125,11 @@ public class DragonBoss : MonoBehaviour
     [SerializeField] private Color deathRayColor = new Color(1f, 0.85f, 1f, 1f);
     [SerializeField] private float deathRayLightIntensity = 5.5f;
     [SerializeField] private float deathRayLightRange = 9f;
-    // Legacy fall fields (kept for scene serialization; unused by the new death fly-out).
-    [SerializeField, HideInInspector] private float deathGravityMultiplier = 1.5f;
-    [SerializeField, HideInInspector] private float deathDiveAlignSpeed = 3.5f;
-    [SerializeField, HideInInspector] private float deathMaxFallSeconds = 8f;
+    // Legacy ground-probe fields still used by death fly-out height resolve.
     [SerializeField, HideInInspector] private LayerMask deathGroundMask = ~0;
     [SerializeField, HideInInspector] private float deathGroundProbeHeight = 120f;
-    [SerializeField, HideInInspector] private float deathImpactClearance = 0.2f;
     [SerializeField, HideInInspector] private float fallDropDistance = 12f;
     [SerializeField, HideInInspector] private Transform deathGroundAnchor;
-    [SerializeField, HideInInspector] private float deathImpactArmSeconds = 0.25f;
-    [SerializeField, HideInInspector] private float deathMaxSpeed = 22f;
-    [SerializeField, HideInInspector] private float fadeOutDuration = 0.65f;
 
     [Header("Hit Collider")]
     [Tooltip("Mesh colliders on the visual mesh children (recommended). Box is a simple fallback.")]

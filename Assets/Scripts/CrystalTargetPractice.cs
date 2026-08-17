@@ -33,13 +33,43 @@ public class CrystalTargetPractice : MonoBehaviour
     [SerializeField, Min(1f)] private float roundSeconds = 30f;
     [SerializeField, Min(1)] private int maxCrystalsAtOnce = 1;
     [SerializeField, Min(0)] private int previewCrystalCount = 1;
-    [SerializeField, Min(0f)] private float minPreviewDistance = 2.5f;
+    [Tooltip("Minimum horizontal (X/Z) distance between crystals/pillars. Y is ignored so tall stacks can still pack.")]
+    [SerializeField, Min(0f)] private float minHorizontalDistance = 2.5f;
+    [Tooltip(
+        "Minimum angle (degrees) between player→crystal sightlines. "
+        + "Rejects spawns that sit in the same view cone as an existing crystal/pillar "
+        + "(stops one target blocking another). 0 = off.")]
+    [SerializeField, Range(0f, 90f)] private float minViewSeparationDegrees = 18f;
+    [Tooltip("If on, angle check ignores height (XZ only). Better for pillars stacked in depth.")]
+    [SerializeField] private bool viewSeparationHorizontalOnly = true;
+    [SerializeField, HideInInspector] private float minPreviewDistance = 2.5f;
     [SerializeField] private bool enableInfiniteArrows = true;
     [SerializeField] private bool clearFlyingArrowsOnRoundEnd = true;
     [Tooltip("Ghost cage grow-in (hard-mode shell phase, sped up).")]
     [SerializeField, Min(0.05f)] private float cageEmergeSeconds = 0.65f;
     [Tooltip("Inner orb grow when a ghost cage becomes live (hard-mode inner phase, sped up).")]
     [SerializeField, Min(0.05f)] private float innerEmergeSeconds = 0.45f;
+
+    [Header("Practice Pillars")]
+    [SerializeField] private bool spawnPillars = true;
+    [Tooltip(
+        "Drag your fight CrystalPillar_* objects (or prefabs) here. "
+        + "Uses each pillar's CrystalPillarRiseSettings offset so crystal height matches the base game. "
+        + "One is picked at random per spawn. Fight crystals on the template are stripped from the copy.")]
+    [SerializeField] private GameObject[] pillarTemplates;
+    [Tooltip("Legacy single template — used if Pillar Templates is empty.")]
+    [SerializeField] private GameObject pillarPrefab;
+    [Tooltip("Fallback only when no templates are assigned.")]
+    [SerializeField, Min(0.5f)] private float pillarHeight = 4f;
+    [SerializeField, Min(0.1f)] private float pillarRadius = 0.35f;
+    [Tooltip("Fallback crystal−pillar Y offset when the template has no CrystalPillarRiseSettings.")]
+    [SerializeField] private float crystalOffsetFromPillarY = 2.15f;
+    [Tooltip("Fallback bury depth when the template has no CrystalPillarRiseSettings.")]
+    [SerializeField, Min(0.5f)] private float pillarBuriedDepth = 8f;
+    [SerializeField, Min(0.1f)] private float pillarRiseSpeed = 5f;
+    [SerializeField, Min(0.1f)] private float pillarSinkSpeed = 10f;
+    [SerializeField] private int pillarLayer = 30;
+    [SerializeField] private Color pillarColor = new Color(0.35f, 0.3f, 0.28f, 1f);
 
     [Header("High Score")]
     [Tooltip("Saved under Application.persistentDataPath.")]
@@ -56,9 +86,23 @@ public class CrystalTargetPractice : MonoBehaviour
     private bool savedInfiniteArrows;
     private CrystalPillarRiseController pillarRise;
     private int pendingLiveSpawns;
+    private int pendingPreviewSpawns;
+    private bool timerStarted;
+    private readonly HashSet<EnderCrystal> promotedFromPreview = new HashSet<EnderCrystal>();
     private readonly List<EnderCrystal> liveCrystals = new List<EnderCrystal>(4);
     private readonly List<EnderCrystal> previewCrystals = new List<EnderCrystal>(4);
     private readonly List<EnderCrystal> emergingCrystals = new List<EnderCrystal>(4);
+    private readonly Dictionary<EnderCrystal, PracticePillar> crystalPillars =
+        new Dictionary<EnderCrystal, PracticePillar>(8);
+    private readonly List<PracticePillar> sinkingPillars = new List<PracticePillar>(8);
+
+    private class PracticePillar
+    {
+        public Transform transform;
+        public float buriedY;
+        public float peakY;
+        public bool cancelRise;
+    }
 
     public bool IsActive => phase != Phase.Inactive;
     public bool IsPlaying => phase == Phase.Playing;
@@ -71,6 +115,11 @@ public class CrystalTargetPractice : MonoBehaviour
     {
         ResolveReferences();
         LoadHighScore();
+        // Migrate old serialized field name.
+        if (minHorizontalDistance <= 0f && minPreviewDistance > 0f)
+        {
+            minHorizontalDistance = minPreviewDistance;
+        }
     }
 
     private void Update()
@@ -80,12 +129,18 @@ public class CrystalTargetPractice : MonoBehaviour
             return;
         }
 
-        timeRemaining -= Time.deltaTime;
-        RefreshPlayingUi();
-
         liveCrystals.RemoveAll(c => c == null);
         previewCrystals.RemoveAll(c => c == null);
         MaintainCrystalCounts();
+
+        if (!timerStarted)
+        {
+            RefreshPlayingUi();
+            return;
+        }
+
+        timeRemaining -= Time.deltaTime;
+        RefreshPlayingUi();
 
         if (timeRemaining <= 0f)
         {
@@ -131,6 +186,8 @@ public class CrystalTargetPractice : MonoBehaviour
 
         score++;
         liveCrystals.Remove(crystal);
+        emergingCrystals.Remove(crystal);
+        BeginSinkPillar(crystal);
         RefreshPlayingUi();
     }
 
@@ -180,7 +237,10 @@ public class CrystalTargetPractice : MonoBehaviour
         score = 0;
         timeRemaining = 0f;
         pendingLiveSpawns = 0;
-        ClearSpawnedCrystals();
+        pendingPreviewSpawns = 0;
+        timerStarted = false;
+        promotedFromPreview.Clear();
+        ClearSpawnedCrystals(sinkPillars: false);
         RestoreInfiniteArrows();
         SuppressDragonFight(false);
     }
@@ -188,20 +248,36 @@ public class CrystalTargetPractice : MonoBehaviour
     private void StartRound()
     {
         StopAllCoroutines();
-        ClearSpawnedCrystals();
+        ClearSpawnedCrystals(sinkPillars: false);
         score = 0;
         timeRemaining = roundSeconds;
+        timerStarted = false;
+        pendingLiveSpawns = 0;
+        pendingPreviewSpawns = 0;
+        promotedFromPreview.Clear();
         phase = Phase.Playing;
         EnableInfiniteArrowsIfNeeded();
         RefreshPlayingUi();
         MaintainCrystalCounts();
     }
 
+    private void BeginTimerIfNeeded()
+    {
+        if (timerStarted || phase != Phase.Playing)
+        {
+            return;
+        }
+
+        timerStarted = true;
+        timeRemaining = roundSeconds;
+        RefreshPlayingUi();
+    }
+
     private void EndRound()
     {
         phase = Phase.Results;
         timeRemaining = 0f;
-        ClearSpawnedCrystals();
+        ClearSpawnedCrystals(sinkPillars: true);
         SaveHighScoreIfNeeded();
 
         if (clearFlyingArrowsOnRoundEnd)
@@ -233,12 +309,29 @@ public class CrystalTargetPractice : MonoBehaviour
             PromotePreview();
         }
 
-        while (liveCrystals.Count + pendingLiveSpawns < maxCrystalsAtOnce)
+        // If a ghost is still forming, wait for it to finish its shell and elevate
+        // to live — do not start a second live spawn that races the cage grow.
+        if (liveCrystals.Count + pendingLiveSpawns < maxCrystalsAtOnce
+            && pendingPreviewSpawns > 0)
         {
-            SpawnCrystal(preview: false);
+            // Forming preview will continue into live when its cage finishes.
+        }
+        else
+        {
+            while (liveCrystals.Count + pendingLiveSpawns < maxCrystalsAtOnce)
+            {
+                SpawnCrystal(preview: false);
+            }
         }
 
-        while (previewCrystals.Count < previewCrystalCount)
+        // Hold ghost pillars until the first live crystal is fully ready,
+        // so the opening target is unambiguous.
+        if (!timerStarted)
+        {
+            return;
+        }
+
+        while (previewCrystals.Count + pendingPreviewSpawns < previewCrystalCount)
         {
             SpawnCrystal(preview: true);
         }
@@ -258,6 +351,9 @@ public class CrystalTargetPractice : MonoBehaviour
             return;
         }
 
+        // Only fully finished ghosts are in previewCrystals; mark so any stale
+        // spawn coroutine cannot reset them back to cage-only.
+        promotedFromPreview.Add(next);
         pendingLiveSpawns++;
         emergingCrystals.Add(next);
         StartCoroutine(CompleteInnerEmergeRoutine(next, addToLive: true));
@@ -276,22 +372,158 @@ public class CrystalTargetPractice : MonoBehaviour
             return;
         }
 
-        // Always start cage-only; ghosts grow the shell, live crystals then grow the inner orb.
         ApplyPracticeCrystalSetup(crystal, preview: true);
-        BeginCrystalCageGrow(crystal);
+
         if (preview)
         {
-            previewCrystals.Add(crystal);
-            StartCoroutine(CompleteCageEmergeRoutine(crystal));
+            // Do NOT add to previewCrystals until cage grow finishes — otherwise
+            // MaintainCrystalCounts can promote mid-animation and corrupt scales.
+            pendingPreviewSpawns++;
+            emergingCrystals.Add(crystal);
+            StartCoroutine(SpawnSequenceRoutine(crystal, promoteToLive: false));
             return;
         }
 
         pendingLiveSpawns++;
         emergingCrystals.Add(crystal);
-        StartCoroutine(CompleteLiveSpawnRoutine(crystal));
+        StartCoroutine(SpawnSequenceRoutine(crystal, promoteToLive: true));
     }
 
-    private IEnumerator CompleteCageEmergeRoutine(EnderCrystal crystal)
+    private IEnumerator SpawnSequenceRoutine(EnderCrystal crystal, bool promoteToLive)
+    {
+        if (crystal == null)
+        {
+            if (promoteToLive)
+            {
+                pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
+                emergingCrystals.Remove(crystal);
+            }
+            else
+            {
+                pendingPreviewSpawns = Mathf.Max(0, pendingPreviewSpawns - 1);
+                emergingCrystals.Remove(crystal);
+            }
+
+            yield break;
+        }
+
+        // Pillar rises first, then ghost cage, then (if live) inner orb.
+        if (spawnPillars)
+        {
+            PracticePillar pillar = CreatePillarForCrystal(crystal);
+            if (pillar != null)
+            {
+                crystalPillars[crystal] = pillar;
+                yield return RisePillarRoutine(pillar);
+            }
+        }
+
+        if (crystal == null || WasPromotedOrCleared(crystal))
+        {
+            FinishSpawnBookkeeping(crystal, promoteToLive);
+            yield break;
+        }
+
+        BeginCrystalCageGrow(crystal);
+        yield return AnimateCageEmerge(crystal);
+
+        if (crystal == null || WasPromotedOrCleared(crystal))
+        {
+            FinishSpawnBookkeeping(crystal, promoteToLive);
+            yield break;
+        }
+
+        // Snap cage to full size so a mid-frame promote/elevate never leaves a baby shell.
+        crystal.SetPracticeCageEmergeProgress(1f);
+
+        if (!promoteToLive)
+        {
+            // Live slot empty while this ghost was forming — finish shell, then grow core
+            // as the live target instead of parking as a preview.
+            bool elevateToLive = liveCrystals.Count + pendingLiveSpawns < maxCrystalsAtOnce;
+            if (elevateToLive)
+            {
+                pendingPreviewSpawns = Mathf.Max(0, pendingPreviewSpawns - 1);
+                pendingLiveSpawns++;
+                promoteToLive = true;
+
+                crystal.CompletePracticeCageShell(asPreview: false);
+                yield return AnimateInnerEmerge(crystal);
+
+                if (crystal == null || WasPromotedOrCleared(crystal))
+                {
+                    FinishSpawnBookkeeping(crystal, promoteToLive: true);
+                    yield break;
+                }
+
+                crystal.CompletePracticeEmerge();
+                crystal.RefreshPracticeVisualState();
+                pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
+                emergingCrystals.Remove(crystal);
+                if (!liveCrystals.Contains(crystal))
+                {
+                    liveCrystals.Add(crystal);
+                }
+
+                BeginTimerIfNeeded();
+                yield break;
+            }
+
+            crystal.CompletePracticeCagePreview();
+            pendingPreviewSpawns = Mathf.Max(0, pendingPreviewSpawns - 1);
+            emergingCrystals.Remove(crystal);
+            if (!previewCrystals.Contains(crystal))
+            {
+                previewCrystals.Add(crystal);
+            }
+
+            yield break;
+        }
+
+        crystal.CompletePracticeCageShell(asPreview: false);
+        yield return AnimateInnerEmerge(crystal);
+
+        if (crystal == null || WasPromotedOrCleared(crystal))
+        {
+            FinishSpawnBookkeeping(crystal, promoteToLive);
+            yield break;
+        }
+
+        crystal.CompletePracticeEmerge();
+        crystal.RefreshPracticeVisualState();
+        pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
+        emergingCrystals.Remove(crystal);
+        if (!liveCrystals.Contains(crystal))
+        {
+            liveCrystals.Add(crystal);
+        }
+
+        BeginTimerIfNeeded();
+    }
+
+    private bool WasPromotedOrCleared(EnderCrystal crystal)
+    {
+        return crystal == null || promotedFromPreview.Contains(crystal);
+    }
+
+    private void FinishSpawnBookkeeping(EnderCrystal crystal, bool promoteToLive)
+    {
+        if (promoteToLive)
+        {
+            pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
+        }
+        else
+        {
+            pendingPreviewSpawns = Mathf.Max(0, pendingPreviewSpawns - 1);
+        }
+
+        if (crystal != null)
+        {
+            emergingCrystals.Remove(crystal);
+        }
+    }
+
+    private IEnumerator AnimateCageEmerge(EnderCrystal crystal)
     {
         if (crystal == null)
         {
@@ -303,7 +535,7 @@ public class CrystalTargetPractice : MonoBehaviour
         while (elapsed < duration)
         {
             elapsed += Time.deltaTime;
-            if (crystal == null)
+            if (crystal == null || WasPromotedOrCleared(crystal))
             {
                 yield break;
             }
@@ -312,63 +544,9 @@ public class CrystalTargetPractice : MonoBehaviour
             yield return null;
         }
 
-        if (crystal == null)
+        if (crystal != null && !WasPromotedOrCleared(crystal))
         {
-            yield break;
-        }
-
-        crystal.CompletePracticeCagePreview();
-    }
-
-    private IEnumerator CompleteLiveSpawnRoutine(EnderCrystal crystal)
-    {
-        if (crystal == null)
-        {
-            pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
-            emergingCrystals.Remove(crystal);
-            yield break;
-        }
-
-        float cageDuration = Mathf.Max(0.05f, cageEmergeSeconds);
-        float cageElapsed = 0f;
-        while (cageElapsed < cageDuration)
-        {
-            cageElapsed += Time.deltaTime;
-            if (crystal == null)
-            {
-                pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
-                emergingCrystals.Remove(crystal);
-                yield break;
-            }
-
-            crystal.SetPracticeCageEmergeProgress(Mathf.Clamp01(cageElapsed / cageDuration));
-            yield return null;
-        }
-
-        if (crystal == null)
-        {
-            pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
-            emergingCrystals.Remove(crystal);
-            yield break;
-        }
-
-        crystal.CompletePracticeCageShell(asPreview: false);
-        yield return AnimateInnerEmerge(crystal);
-
-        if (crystal == null)
-        {
-            pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
-            emergingCrystals.Remove(crystal);
-            yield break;
-        }
-
-        crystal.CompletePracticeEmerge();
-        crystal.RefreshPracticeVisualState();
-        pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
-        emergingCrystals.Remove(crystal);
-        if (!liveCrystals.Contains(crystal))
-        {
-            liveCrystals.Add(crystal);
+            crystal.SetPracticeCageEmergeProgress(1f);
         }
     }
 
@@ -404,15 +582,6 @@ public class CrystalTargetPractice : MonoBehaviour
             yield break;
         }
 
-        yield return null;
-
-        if (crystal == null)
-        {
-            pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
-            emergingCrystals.Remove(crystal);
-            yield break;
-        }
-
         yield return AnimateInnerEmerge(crystal);
 
         if (crystal == null)
@@ -426,9 +595,263 @@ public class CrystalTargetPractice : MonoBehaviour
         crystal.RefreshPracticeVisualState();
         pendingLiveSpawns = Mathf.Max(0, pendingLiveSpawns - 1);
         emergingCrystals.Remove(crystal);
+        promotedFromPreview.Remove(crystal);
         if (addToLive && !liveCrystals.Contains(crystal))
         {
             liveCrystals.Add(crystal);
+        }
+
+        if (addToLive)
+        {
+            BeginTimerIfNeeded();
+        }
+    }
+
+    private PracticePillar CreatePillarForCrystal(EnderCrystal crystal)
+    {
+        if (crystal == null)
+        {
+            return null;
+        }
+
+        Vector3 crystalPos = crystal.transform.position;
+        GameObject template = PickPillarTemplate();
+
+        float offsetY = crystalOffsetFromPillarY;
+        float buryDepth = Mathf.Abs(pillarBuriedDepth);
+        if (template != null)
+        {
+            CrystalPillarRiseSettings templateSettings =
+                template.GetComponent<CrystalPillarRiseSettings>();
+            if (templateSettings != null)
+            {
+                templateSettings.EnsureRestPose();
+                offsetY = templateSettings.CrystalOffsetFromPillarY;
+                buryDepth = templateSettings.BuriedDepthBelowCrystal;
+            }
+        }
+
+        float peakY = crystalPos.y - offsetY;
+        float buriedY = peakY - buryDepth;
+
+        GameObject pillarGo;
+        if (template != null)
+        {
+            // Instantiate even if the template is a scene object (e.g. CrystalPillar_1).
+            bool wasActive = template.activeSelf;
+            pillarGo = Instantiate(template, transform);
+            pillarGo.name = "PracticePillar_" + (template.name);
+            pillarGo.SetActive(true);
+            StripFightCrystalParts(pillarGo);
+            if (!wasActive)
+            {
+                // Leave original alone; copy is active for practice.
+            }
+        }
+        else
+        {
+            pillarGo = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            pillarGo.name = "PracticePillar";
+            pillarGo.transform.SetParent(transform, true);
+            float halfHeight = Mathf.Max(0.25f, pillarHeight * 0.5f);
+            pillarGo.transform.localScale = new Vector3(pillarRadius * 2f, halfHeight, pillarRadius * 2f);
+
+            Renderer renderer = pillarGo.GetComponent<Renderer>();
+            if (renderer != null)
+            {
+                Material mat = renderer.material;
+                if (mat.HasProperty("_Color"))
+                {
+                    mat.color = pillarColor;
+                }
+                else if (mat.HasProperty("_BaseColor"))
+                {
+                    mat.SetColor("_BaseColor", pillarColor);
+                }
+            }
+        }
+
+        pillarGo.transform.position = new Vector3(crystalPos.x, buriedY, crystalPos.z);
+        pillarGo.transform.rotation = Quaternion.identity;
+        SetLayerRecursive(pillarGo.transform, pillarLayer);
+
+        // Practice drives rise/sink manually — keep settings for offset data only.
+        CrystalPillarRiseSettings instanceSettings =
+            pillarGo.GetComponent<CrystalPillarRiseSettings>();
+        if (instanceSettings != null)
+        {
+            instanceSettings.enabled = false;
+        }
+
+        return new PracticePillar
+        {
+            transform = pillarGo.transform,
+            buriedY = buriedY,
+            peakY = peakY
+        };
+    }
+
+    private GameObject PickPillarTemplate()
+    {
+        if (pillarTemplates != null && pillarTemplates.Length > 0)
+        {
+            int usable = 0;
+            for (int i = 0; i < pillarTemplates.Length; i++)
+            {
+                if (pillarTemplates[i] != null)
+                {
+                    usable++;
+                }
+            }
+
+            if (usable > 0)
+            {
+                int pick = Random.Range(0, usable);
+                for (int i = 0; i < pillarTemplates.Length; i++)
+                {
+                    if (pillarTemplates[i] == null)
+                    {
+                        continue;
+                    }
+
+                    if (pick == 0)
+                    {
+                        return pillarTemplates[i];
+                    }
+
+                    pick--;
+                }
+            }
+        }
+
+        return pillarPrefab;
+    }
+
+    private static void StripFightCrystalParts(GameObject pillarGo)
+    {
+        if (pillarGo == null)
+        {
+            return;
+        }
+
+        EnderCrystal[] crystals = pillarGo.GetComponentsInChildren<EnderCrystal>(true);
+        for (int i = 0; i < crystals.Length; i++)
+        {
+            if (crystals[i] != null)
+            {
+                Destroy(crystals[i].gameObject);
+            }
+        }
+    }
+
+    private IEnumerator RisePillarRoutine(PracticePillar pillar)
+    {
+        if (pillar == null || pillar.transform == null)
+        {
+            yield break;
+        }
+
+        Vector3 pos = pillar.transform.position;
+        pos.y = pillar.buriedY;
+        pillar.transform.position = pos;
+
+        float speed = Mathf.Max(0.1f, pillarRiseSpeed);
+        while (pillar.transform != null
+            && !pillar.cancelRise
+            && pos.y < pillar.peakY - 0.001f)
+        {
+            pos.y = Mathf.MoveTowards(pos.y, pillar.peakY, speed * Time.deltaTime);
+            pillar.transform.position = pos;
+            yield return null;
+        }
+
+        if (pillar.transform != null && !pillar.cancelRise)
+        {
+            pos.y = pillar.peakY;
+            pillar.transform.position = pos;
+        }
+    }
+
+    private void BeginSinkPillar(EnderCrystal crystal)
+    {
+        if (crystal == null || !crystalPillars.TryGetValue(crystal, out PracticePillar pillar))
+        {
+            return;
+        }
+
+        crystalPillars.Remove(crystal);
+        BeginSinkPillarInstance(pillar);
+    }
+
+    private void BeginSinkPillarInstance(PracticePillar pillar)
+    {
+        if (pillar == null || pillar.transform == null)
+        {
+            return;
+        }
+
+        pillar.cancelRise = true;
+        if (sinkingPillars.Contains(pillar))
+        {
+            return;
+        }
+
+        sinkingPillars.Add(pillar);
+        StartCoroutine(SinkPillarRoutine(pillar));
+    }
+
+    private void SinkAllPillars(List<PracticePillar> pillars)
+    {
+        if (pillars == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < pillars.Count; i++)
+        {
+            BeginSinkPillarInstance(pillars[i]);
+        }
+    }
+
+    private IEnumerator SinkPillarRoutine(PracticePillar pillar)
+    {
+        if (pillar == null || pillar.transform == null)
+        {
+            if (pillar != null)
+            {
+                sinkingPillars.Remove(pillar);
+            }
+
+            yield break;
+        }
+
+        Vector3 pos = pillar.transform.position;
+        float speed = Mathf.Max(0.1f, pillarSinkSpeed);
+        while (pillar.transform != null && pos.y > pillar.buriedY + 0.001f)
+        {
+            pos.y = Mathf.MoveTowards(pos.y, pillar.buriedY, speed * Time.deltaTime);
+            pillar.transform.position = pos;
+            yield return null;
+        }
+
+        sinkingPillars.Remove(pillar);
+        if (pillar.transform != null)
+        {
+            Destroy(pillar.transform.gameObject);
+        }
+    }
+
+    private static void SetLayerRecursive(Transform root, int layer)
+    {
+        if (root == null)
+        {
+            return;
+        }
+
+        root.gameObject.layer = layer;
+        for (int i = 0; i < root.childCount; i++)
+        {
+            SetLayerRecursive(root.GetChild(i), layer);
         }
     }
 
@@ -484,19 +907,10 @@ public class CrystalTargetPractice : MonoBehaviour
         if (bounds.size.sqrMagnitude < 1e-6f)
         {
             point = transform.position + Vector3.forward * 3f + Vector3.up * 1.5f;
-            return IsFarEnoughFromOtherCrystals(point, ignore);
+            return IsValidSpawnPoint(point, ignore);
         }
 
-        if (minPreviewDistance <= 0f)
-        {
-            point = new Vector3(
-                Random.Range(bounds.min.x, bounds.max.x),
-                Random.Range(bounds.min.y, bounds.max.y),
-                Random.Range(bounds.min.z, bounds.max.z));
-            return true;
-        }
-
-        const int maxAttempts = 32;
+        const int maxAttempts = 48;
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
             Vector3 candidate = new Vector3(
@@ -504,7 +918,7 @@ public class CrystalTargetPractice : MonoBehaviour
                 Random.Range(bounds.min.y, bounds.max.y),
                 Random.Range(bounds.min.z, bounds.max.z));
 
-            if (IsFarEnoughFromOtherCrystals(candidate, ignore))
+            if (IsValidSpawnPoint(candidate, ignore))
             {
                 point = candidate;
                 return true;
@@ -515,14 +929,78 @@ public class CrystalTargetPractice : MonoBehaviour
         return false;
     }
 
-    private bool IsFarEnoughFromOtherCrystals(Vector3 point, EnderCrystal ignore)
+    private bool IsValidSpawnPoint(Vector3 point, EnderCrystal ignore)
     {
-        if (minPreviewDistance <= 0f)
+        return IsFarEnoughHorizontally(point, ignore)
+               && IsClearOfViewSectors(point, ignore);
+    }
+
+    private bool IsFarEnoughHorizontally(Vector3 point, EnderCrystal ignore)
+    {
+        if (minHorizontalDistance <= 0f)
         {
             return true;
         }
 
-        float minDistSq = minPreviewDistance * minPreviewDistance;
+        float minDistSq = minHorizontalDistance * minHorizontalDistance;
+        List<Vector3> occupied = CollectOccupiedPositions(ignore);
+        for (int i = 0; i < occupied.Count; i++)
+        {
+            if (HorizontalDistanceSq(occupied[i], point) < minDistSq)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool IsClearOfViewSectors(Vector3 point, EnderCrystal ignore)
+    {
+        if (minViewSeparationDegrees <= 0.01f)
+        {
+            return true;
+        }
+
+        Vector3 player = ResolvePlayerViewOrigin();
+        Vector3 toCandidate = point - player;
+        if (viewSeparationHorizontalOnly)
+        {
+            toCandidate.y = 0f;
+        }
+
+        if (toCandidate.sqrMagnitude < 0.01f)
+        {
+            return false;
+        }
+
+        float minAngle = minViewSeparationDegrees;
+        List<Vector3> occupied = CollectOccupiedPositions(ignore);
+        for (int i = 0; i < occupied.Count; i++)
+        {
+            Vector3 toOther = occupied[i] - player;
+            if (viewSeparationHorizontalOnly)
+            {
+                toOther.y = 0f;
+            }
+
+            if (toOther.sqrMagnitude < 0.01f)
+            {
+                continue;
+            }
+
+            if (Vector3.Angle(toCandidate, toOther) < minAngle)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private List<Vector3> CollectOccupiedPositions(EnderCrystal ignore)
+    {
+        List<Vector3> occupied = new List<Vector3>(16);
 
         for (int i = 0; i < liveCrystals.Count; i++)
         {
@@ -532,10 +1010,7 @@ public class CrystalTargetPractice : MonoBehaviour
                 continue;
             }
 
-            if ((GetCrystalWorldPosition(other) - point).sqrMagnitude < minDistSq)
-            {
-                return false;
-            }
+            occupied.Add(GetCrystalWorldPosition(other));
         }
 
         for (int i = 0; i < previewCrystals.Count; i++)
@@ -546,10 +1021,7 @@ public class CrystalTargetPractice : MonoBehaviour
                 continue;
             }
 
-            if ((GetCrystalWorldPosition(other) - point).sqrMagnitude < minDistSq)
-            {
-                return false;
-            }
+            occupied.Add(GetCrystalWorldPosition(other));
         }
 
         for (int i = 0; i < emergingCrystals.Count; i++)
@@ -560,13 +1032,55 @@ public class CrystalTargetPractice : MonoBehaviour
                 continue;
             }
 
-            if ((GetCrystalWorldPosition(other) - point).sqrMagnitude < minDistSq)
-            {
-                return false;
-            }
+            occupied.Add(GetCrystalWorldPosition(other));
         }
 
-        return true;
+        foreach (KeyValuePair<EnderCrystal, PracticePillar> pair in crystalPillars)
+        {
+            if (pair.Key == ignore || pair.Value == null || pair.Value.transform == null)
+            {
+                continue;
+            }
+
+            occupied.Add(pair.Value.transform.position);
+        }
+
+        for (int i = 0; i < sinkingPillars.Count; i++)
+        {
+            PracticePillar pillar = sinkingPillars[i];
+            if (pillar == null || pillar.transform == null)
+            {
+                continue;
+            }
+
+            occupied.Add(pillar.transform.position);
+        }
+
+        return occupied;
+    }
+
+    private static Vector3 ResolvePlayerViewOrigin()
+    {
+        Vector3 aim = PlayEnvironment.ResolvePlayerAimPosition();
+        if (aim.sqrMagnitude > 1e-6f || PlayEnvironment.ResolvePlayerTransform() != null)
+        {
+            return aim;
+        }
+
+        Camera cam = PlayEnvironment.ResolveViewCamera();
+        if (cam != null)
+        {
+            return cam.transform.position;
+        }
+
+        return Vector3.zero;
+    }
+
+    private static float HorizontalDistanceSq(Vector3 a, Vector3 b)
+    {
+        float dx = a.x - b.x;
+        float dz = a.z - b.z;
+        return dx * dx + dz * dz;
     }
 
     private static Vector3 GetCrystalWorldPosition(EnderCrystal crystal)
@@ -574,41 +1088,89 @@ public class CrystalTargetPractice : MonoBehaviour
         return crystal != null ? crystal.transform.position : Vector3.zero;
     }
 
-    private void ClearSpawnedCrystals()
+    private void ClearSpawnedCrystals(bool sinkPillars = false)
     {
         pendingLiveSpawns = 0;
+        pendingPreviewSpawns = 0;
+        promotedFromPreview.Clear();
 
-        for (int i = 0; i < liveCrystals.Count; i++)
+        // Snapshot live + ghost + already-sinking pillars before crystals are wiped.
+        List<PracticePillar> ownedPillars = CollectOwnedPillars();
+        crystalPillars.Clear();
+
+        for (int i = 0; i < ownedPillars.Count; i++)
         {
-            if (liveCrystals[i] != null)
+            if (ownedPillars[i] != null)
             {
-                Destroy(liveCrystals[i].gameObject);
+                ownedPillars[i].cancelRise = true;
             }
         }
 
+        DestroyCrystalList(liveCrystals);
+        DestroyCrystalList(previewCrystals);
+        DestroyCrystalList(emergingCrystals);
         liveCrystals.Clear();
-
-        for (int i = 0; i < previewCrystals.Count; i++)
-        {
-            if (previewCrystals[i] != null)
-            {
-                Destroy(previewCrystals[i].gameObject);
-            }
-        }
-
         previewCrystals.Clear();
+        emergingCrystals.Clear();
 
-        for (int i = 0; i < emergingCrystals.Count; i++)
+        if (sinkPillars)
         {
-            if (emergingCrystals[i] != null
-                && !liveCrystals.Contains(emergingCrystals[i])
-                && !previewCrystals.Contains(emergingCrystals[i]))
+            SinkAllPillars(ownedPillars);
+            return;
+        }
+
+        DestroyPillarsImmediate(ownedPillars);
+    }
+
+    private List<PracticePillar> CollectOwnedPillars()
+    {
+        List<PracticePillar> owned = new List<PracticePillar>(
+            crystalPillars.Count + sinkingPillars.Count);
+
+        foreach (PracticePillar pillar in crystalPillars.Values)
+        {
+            if (pillar != null && !owned.Contains(pillar))
             {
-                Destroy(emergingCrystals[i].gameObject);
+                owned.Add(pillar);
             }
         }
 
-        emergingCrystals.Clear();
+        for (int i = 0; i < sinkingPillars.Count; i++)
+        {
+            PracticePillar pillar = sinkingPillars[i];
+            if (pillar != null && !owned.Contains(pillar))
+            {
+                owned.Add(pillar);
+            }
+        }
+
+        return owned;
+    }
+
+    private static void DestroyCrystalList(List<EnderCrystal> crystals)
+    {
+        for (int i = 0; i < crystals.Count; i++)
+        {
+            if (crystals[i] != null)
+            {
+                Destroy(crystals[i].gameObject);
+            }
+        }
+    }
+
+    private void DestroyPillarsImmediate(List<PracticePillar> pillars)
+    {
+        for (int i = 0; i < pillars.Count; i++)
+        {
+            PracticePillar pillar = pillars[i];
+            if (pillar != null && pillar.transform != null)
+            {
+                Destroy(pillar.transform.gameObject);
+            }
+        }
+
+        crystalPillars.Clear();
+        sinkingPillars.Clear();
     }
 
     private void SuppressDragonFight(bool suppress)

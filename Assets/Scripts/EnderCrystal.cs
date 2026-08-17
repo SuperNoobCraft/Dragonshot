@@ -302,14 +302,22 @@ public class EnderCrystal : MonoBehaviour
         regenerateElapsed = 0f;
 
         EnsureCrystalVisual();
-        CachePartBaseScales();
+        // Never re-cache from the current animated scale — mid-grow cages would
+        // permanently shrink the crystal if promotion raced cage emerge.
+        if (outerSpinBaseScale.sqrMagnitude < 0.25f)
+        {
+            outerSpinBaseScale = Vector3.one;
+        }
+
+        if (innerSpinBaseScale.sqrMagnitude < 0.25f)
+        {
+            innerSpinBaseScale = Vector3.one;
+        }
 
         if (outerSpin != null)
         {
             outerSpin.gameObject.SetActive(true);
-            outerSpin.localScale = outerSpinBaseScale.sqrMagnitude > 0.0001f
-                ? outerSpinBaseScale
-                : Vector3.one;
+            outerSpin.localScale = outerSpinBaseScale;
         }
 
         if (innerSpin != null)
