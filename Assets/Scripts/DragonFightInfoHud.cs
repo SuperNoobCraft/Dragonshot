@@ -4,7 +4,8 @@ using System.Reflection;
 
 /// <summary>
 /// Runtime HUD parented under vGear → Frame → Info → InfoUI (Votanic creates InfoUI at play).
-/// Anchored top-left; shows fight time + HP only while the dragon fight is playing.
+/// Primary copy: top-left. Optional front copy: same parent, shifted to the left edge of the
+/// right-panel canvas, rotated on Y so it faces the front wall in a multi-wall CAVE.
 /// </summary>
 public class DragonFightInfoHud : MonoBehaviour
 {
@@ -13,14 +14,31 @@ public class DragonFightInfoHud : MonoBehaviour
     [SerializeField] private string hudObjectName = "DragonFightHud";
     [SerializeField] private bool logDebug = true;
 
-    [Header("Layout")]
+    [Header("Primary Layout (top-left)")]
+    [Tooltip("Off = big-cave export: hide the original top-left HUD and use the front copy only.")]
+    [SerializeField] private bool enablePrimaryCopy = true;
     [SerializeField] private Vector2 anchoredPosition = new Vector2(24f, -24f);
     [SerializeField] private Vector2 sizeDelta = new Vector2(480f, 160f);
     [SerializeField] private int fontSize = 36;
     [SerializeField] private Color textColor = Color.white;
 
+    [Header("Front Copy (same InfoUI / right panel)")]
+    [Tooltip("Duplicate HUD shifted to the left edge of the right panel (front screen in big CAVE).")]
+    [SerializeField] private bool enableFrontCopy = true;
+    [SerializeField] private string frontHudObjectName = "DragonFightHudFront";
+    [Tooltip("Top-left anchor on the right-panel canvas — left edge ≈ front wall.")]
+    [SerializeField] private Vector2 frontAnchoredPosition = new Vector2(12f, -24f);
+    [Tooltip("Depth offset (local Z). Negative pulls the copy toward the front wall.")]
+    [SerializeField] private float frontAnchoredPositionZ = -48f;
+    [Tooltip("Local euler angles. Y ≈ 90° swings the copy off the right panel toward the front wall "
+             + "(not Z — that only spins text vertically on the same panel).")]
+    [SerializeField] private Vector3 frontLocalEulerAngles = new Vector3(0f, 90f, 0f);
+    [SerializeField, Min(0.1f)] private float frontSizeMultiplier = 2f;
+
     private RectTransform hudRoot;
     private Text hudText;
+    private RectTransform frontHudRoot;
+    private Text frontHudText;
     private bool visible;
     private string pendingText = string.Empty;
     private float nextFindAttempt;
@@ -43,12 +61,17 @@ public class DragonFightInfoHud : MonoBehaviour
         {
             hudRoot.gameObject.SetActive(false);
         }
+
+        if (frontHudRoot != null)
+        {
+            frontHudRoot.gameObject.SetActive(false);
+        }
     }
 
     private void Start()
     {
         nextFindAttempt = 0f;
-        TryEnsureHudObject();
+        TryEnsureHudObjects();
     }
 
     private void Update()
@@ -56,49 +79,115 @@ public class DragonFightInfoHud : MonoBehaviour
         if (Time.unscaledTime >= nextFindAttempt)
         {
             nextFindAttempt = Time.unscaledTime + 0.25f;
-            TryEnsureHudObject();
+            TryEnsureHudObjects();
         }
 
-        if (!visible || hudText == null || hudRoot == null)
+        if (!visible)
         {
             return;
         }
 
-        if (!hudRoot.gameObject.activeSelf)
+        if (enablePrimaryCopy)
         {
-            hudRoot.gameObject.SetActive(true);
+            SyncText(hudRoot, hudText);
+        }
+        else if (hudRoot != null)
+        {
+            hudRoot.gameObject.SetActive(false);
         }
 
-        if (hudText.text != pendingText)
+        if (enableFrontCopy)
         {
-            hudText.text = pendingText;
+            SyncText(frontHudRoot, frontHudText);
+        }
+        else if (frontHudRoot != null)
+        {
+            frontHudRoot.gameObject.SetActive(false);
         }
     }
 
     private void Apply()
     {
-        TryEnsureHudObject();
-        if (hudRoot == null || hudText == null)
+        TryEnsureHudObjects();
+        if (enablePrimaryCopy)
         {
-            return;
+            SetHudActive(hudRoot, hudText);
+        }
+        else if (hudRoot != null)
+        {
+            hudRoot.gameObject.SetActive(false);
         }
 
-        hudRoot.gameObject.SetActive(visible);
-        if (visible)
+        if (enableFrontCopy)
         {
-            hudText.text = pendingText;
+            SetHudActive(frontHudRoot, frontHudText);
+        }
+        else if (frontHudRoot != null)
+        {
+            frontHudRoot.gameObject.SetActive(false);
         }
     }
 
-    private void TryEnsureHudObject()
+    private void SyncText(RectTransform root, Text text)
     {
-        if (hudRoot != null && hudText != null && hudRoot.parent != null)
+        if (root == null || text == null)
         {
             return;
         }
 
-        hudRoot = null;
-        hudText = null;
+        if (!root.gameObject.activeSelf)
+        {
+            root.gameObject.SetActive(true);
+        }
+
+        if (text.text != pendingText)
+        {
+            text.text = pendingText;
+        }
+    }
+
+    private void SetHudActive(RectTransform root, Text text)
+    {
+        if (root == null || text == null)
+        {
+            return;
+        }
+
+        root.gameObject.SetActive(visible);
+        if (visible)
+        {
+            text.text = pendingText;
+        }
+    }
+
+    private void TryEnsureHudObjects()
+    {
+        bool primaryReady = !enablePrimaryCopy
+            || (hudRoot != null && hudText != null && hudRoot.parent != null);
+        bool frontReady = !enableFrontCopy
+            || (frontHudRoot != null && frontHudText != null && frontHudRoot.parent != null);
+        if (primaryReady && frontReady)
+        {
+            return;
+        }
+
+        if (!primaryReady && enablePrimaryCopy)
+        {
+            hudRoot = null;
+            hudText = null;
+        }
+
+        if (!frontReady && enableFrontCopy)
+        {
+            frontHudRoot = null;
+            frontHudText = null;
+        }
+
+        if (!enablePrimaryCopy && !enableFrontCopy)
+        {
+            return;
+        }
+
         cachedInfoUi = null;
 
         Transform infoUi = ResolveInfoUi();
@@ -118,16 +207,69 @@ public class DragonFightInfoHud : MonoBehaviour
 
         cachedInfoUi = infoUi;
 
-        Transform existing = infoUi.Find(hudObjectName);
+        if (enablePrimaryCopy && !primaryReady)
+        {
+            EnsureHudInstance(
+                infoUi,
+                hudObjectName,
+                primaryLayout: true,
+                out hudRoot,
+                out hudText);
+        }
+
+        if (enableFrontCopy && !frontReady)
+        {
+            EnsureHudInstance(
+                infoUi,
+                frontHudObjectName,
+                primaryLayout: false,
+                out frontHudRoot,
+                out frontHudText);
+        }
+    }
+
+    private void EnsureHudInstance(
+        Transform infoUi,
+        string objectName,
+        bool primaryLayout,
+        out RectTransform root,
+        out Text text)
+    {
+        root = null;
+        text = null;
+
+        Transform existing = infoUi.Find(objectName);
         if (existing != null)
         {
-            BindExisting(existing, infoUi);
-            return;
+            root = existing as RectTransform;
+            if (root == null)
+            {
+                Destroy(existing.gameObject);
+            }
+            else
+            {
+                text = existing.GetComponent<Text>();
+                if (text == null)
+                {
+                    if (existing.GetComponent<CanvasRenderer>() == null)
+                    {
+                        existing.gameObject.AddComponent<CanvasRenderer>();
+                    }
+
+                    text = existing.gameObject.AddComponent<Text>();
+                    StyleText(text, infoUi, primaryLayout);
+                }
+
+                ApplyLayout(root, primaryLayout);
+                root.gameObject.SetActive(visible);
+                LogCreated(infoUi, objectName, rebound: true);
+                return;
+            }
         }
 
         try
         {
-            CreateHudUnder(infoUi);
+            CreateHudUnder(infoUi, objectName, primaryLayout, out root, out text);
         }
         catch (System.Exception ex)
         {
@@ -135,50 +277,28 @@ public class DragonFightInfoHud : MonoBehaviour
         }
     }
 
-    private void BindExisting(Transform existing, Transform infoUi)
-    {
-        hudRoot = existing as RectTransform;
-        if (hudRoot == null)
-        {
-            Destroy(existing.gameObject);
-            CreateHudUnder(infoUi);
-            return;
-        }
-
-        hudText = existing.GetComponent<Text>();
-        if (hudText == null)
-        {
-            if (existing.GetComponent<CanvasRenderer>() == null)
-            {
-                existing.gameObject.AddComponent<CanvasRenderer>();
-            }
-
-            hudText = existing.gameObject.AddComponent<Text>();
-            StyleText(hudText, infoUi);
-        }
-
-        Layout(hudRoot);
-        hudRoot.gameObject.SetActive(visible);
-        LogCreated(infoUi, rebound: true);
-    }
-
-    private void CreateHudUnder(Transform infoUi)
+    private void CreateHudUnder(
+        Transform infoUi,
+        string objectName,
+        bool primaryLayout,
+        out RectTransform root,
+        out Text text)
     {
         EnsureCanvas(infoUi);
 
-        GameObject go = new GameObject(hudObjectName, typeof(RectTransform), typeof(CanvasRenderer));
+        GameObject go = new GameObject(objectName, typeof(RectTransform), typeof(CanvasRenderer));
         go.layer = infoUi.gameObject.layer;
         go.transform.SetParent(infoUi, false);
 
-        hudRoot = go.GetComponent<RectTransform>();
-        Layout(hudRoot);
+        root = go.GetComponent<RectTransform>();
+        ApplyLayout(root, primaryLayout);
 
-        hudText = go.AddComponent<Text>();
-        StyleText(hudText, infoUi);
-        hudText.text = string.IsNullOrEmpty(pendingText) ? "TIME --\nHP --/--" : pendingText;
+        text = go.AddComponent<Text>();
+        StyleText(text, infoUi, primaryLayout);
+        text.text = string.IsNullOrEmpty(pendingText) ? "TIME --\nHP --/--" : pendingText;
         go.SetActive(visible);
 
-        LogCreated(infoUi, rebound: false);
+        LogCreated(infoUi, objectName, rebound: false);
     }
 
     private static void EnsureCanvas(Transform infoUi)
@@ -207,19 +327,37 @@ public class DragonFightInfoHud : MonoBehaviour
         }
     }
 
-    private void Layout(RectTransform rt)
+    private void ApplyLayout(RectTransform rt, bool primaryLayout)
     {
-        rt.localScale = Vector3.one;
-        rt.localRotation = Quaternion.identity;
-        rt.anchorMin = new Vector2(0f, 1f);
-        rt.anchorMax = new Vector2(0f, 1f);
-        rt.pivot = new Vector2(0f, 1f);
-        rt.anchoredPosition = anchoredPosition;
-        rt.sizeDelta = sizeDelta;
+        if (primaryLayout)
+        {
+            rt.localScale = Vector3.one;
+            rt.localRotation = Quaternion.identity;
+            rt.anchorMin = new Vector2(0f, 1f);
+            rt.anchorMax = new Vector2(0f, 1f);
+            rt.pivot = new Vector2(0f, 1f);
+            rt.anchoredPosition = anchoredPosition;
+            rt.sizeDelta = sizeDelta;
+        }
+        else
+        {
+            rt.localScale = Vector3.one * frontSizeMultiplier;
+            rt.localRotation = Quaternion.Euler(frontLocalEulerAngles);
+            // Left edge of the right-panel canvas ≈ front wall in a wide CAVE.
+            rt.anchorMin = new Vector2(0f, 1f);
+            rt.anchorMax = new Vector2(0f, 1f);
+            rt.pivot = new Vector2(1f, 1f);
+            rt.anchoredPosition3D = new Vector3(
+                frontAnchoredPosition.x,
+                frontAnchoredPosition.y,
+                frontAnchoredPositionZ);
+            rt.sizeDelta = sizeDelta;
+        }
+
         rt.SetAsLastSibling();
     }
 
-    private void StyleText(Text text, Transform infoUi)
+    private void StyleText(Text text, Transform infoUi, bool primaryLayout)
     {
         Font font = null;
         int size = fontSize;
@@ -255,7 +393,7 @@ public class DragonFightInfoHud : MonoBehaviour
         text.font = font;
         text.fontSize = Mathf.Max(18, size);
         text.color = textColor;
-        text.alignment = TextAnchor.UpperLeft;
+        text.alignment = primaryLayout ? TextAnchor.UpperLeft : TextAnchor.UpperRight;
         text.horizontalOverflow = HorizontalWrapMode.Overflow;
         text.verticalOverflow = VerticalWrapMode.Overflow;
         text.raycastTarget = false;
@@ -470,7 +608,7 @@ public class DragonFightInfoHud : MonoBehaviour
         return best;
     }
 
-    private void LogCreated(Transform infoUi, bool rebound)
+    private void LogCreated(Transform infoUi, string objectName, bool rebound)
     {
         if (loggedCreated || !logDebug)
         {
@@ -481,7 +619,7 @@ public class DragonFightInfoHud : MonoBehaviour
         Debug.Log(
             "DragonFightInfoHud: "
             + (rebound ? "bound" : "created")
-            + " '" + hudObjectName + "' under " + GetPath(infoUi)
+            + " '" + objectName + "' under " + GetPath(infoUi)
             + " (children=" + infoUi.childCount + ").",
             hudRoot != null ? hudRoot.gameObject : infoUi.gameObject);
     }
