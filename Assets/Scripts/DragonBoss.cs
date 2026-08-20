@@ -206,6 +206,8 @@ public class DragonBoss : MonoBehaviour
     [SerializeField, HideInInspector, Min(1f)] private float fireballInterval = 5.5f;
     [Tooltip("Delay after Start before the first fireball.")]
     [SerializeField, Min(0f)] private float fireballFirstDelay = 2.5f;
+    [Tooltip("Survival arcade ignores Fireball First Delay and uses this instead.")]
+    [SerializeField, Min(0f)] private float survivalFirstFireballDelay = 2f;
     [Tooltip("Chance to fire when a shot is due (0–1).")]
     [SerializeField, Range(0f, 1f)] private float fireballChance = 0.75f;
     [Tooltip("Only spawn when the mouth is in the center this fraction of Flight Bounds X "
@@ -253,6 +255,22 @@ public class DragonBoss : MonoBehaviour
     private float nextFireballTime;
     private float nextHitColliderBakeTime;
     private bool overtimeChase;
+    private bool survivalModeActive;
+    private float survivalElapsed;
+    private DragonSurvivalMode survivalMode;
+    private float survivalIntervalStart = 5.5f;
+    private float survivalIntervalMin = 1.2f;
+    private float survivalSpeedStart = 3.2f;
+    private float survivalSpeedMax = 6.5f;
+    private float survivalEscalationRampSeconds = 120f;
+    private float survivalIntervalVariance;
+    private float survivalSpeedVariance;
+    private float survivalPathSpeedVariance;
+    private float survivalAimOffsetRadius;
+    private float survivalSpawnOffsetRadius;
+    private float survivalFirstDelayVariance;
+    private float survivalPathSpeedMultiplier = 1f;
+    private float survivalPathSpeedRefreshTime;
     private readonly List<AnimatedHitCollider> animatedHitColliders = new List<AnimatedHitCollider>(4);
 
     private struct AnimatedHitCollider
@@ -286,7 +304,9 @@ public class DragonBoss : MonoBehaviour
     public bool ShouldShowCrystalShieldVisual =>
         phase == FightPhase.Playing
         && !dead && !isDying
-        && liveCrystals.Count > 0;
+        && (survivalModeActive || liveCrystals.Count > 0);
+    public bool IsSurvivalMode => survivalModeActive;
+    public float SurvivalElapsedSeconds => survivalElapsed;
     public int CurrentHp => currentHp;
     public int MaxHp => ActiveMaxHp;
     public float RoundSeconds => ActiveRoundSeconds;
@@ -297,9 +317,28 @@ public class DragonBoss : MonoBehaviour
 
     private int ActiveMaxHp => GetTuning(difficulty).maxHp;
     private float ActiveRoundSeconds => GetTuning(difficulty).roundSeconds;
-    private float ActiveFireballInterval => Mathf.Max(1f, GetTuning(difficulty).fireballInterval);
-    private float ActivePathSpeed => Mathf.Max(0.01f, GetTuning(difficulty).pathSpeed);
-    private float ActiveFireballSpeed => Mathf.Max(0.1f, GetTuning(difficulty).fireballSpeed);
+    private float ActiveFireballInterval =>
+        survivalModeActive
+            ? GetSurvivalFireballInterval()
+            : Mathf.Max(1f, GetTuning(difficulty).fireballInterval);
+    private float ActivePathSpeed
+    {
+        get
+        {
+            float speed = Mathf.Max(0.01f, GetTuning(difficulty).pathSpeed);
+            if (survivalModeActive)
+            {
+                RefreshSurvivalPathSpeedMultiplierIfNeeded();
+                speed *= survivalPathSpeedMultiplier;
+            }
+
+            return speed;
+        }
+    }
+    private float ActiveFireballSpeed =>
+        survivalModeActive
+            ? GetSurvivalFireballSpeed()
+            : Mathf.Max(0.1f, GetTuning(difficulty).fireballSpeed);
 
     private DifficultyFightTuning GetTuning(FightDifficulty value)
     {
@@ -455,7 +494,7 @@ public class DragonBoss : MonoBehaviour
         int damage,
         string sourceLabel)
     {
-        if (!IsFightActive || damage <= 0)
+        if (survivalModeActive || !IsFightActive || damage <= 0)
         {
             return;
         }
@@ -620,7 +659,11 @@ public class DragonBoss : MonoBehaviour
 
         if (phase == FightPhase.Playing && !dead && !isDying)
         {
-            if (!overtimeChase)
+            if (survivalModeActive)
+            {
+                survivalElapsed += Time.deltaTime;
+            }
+            else if (!overtimeChase)
             {
                 timeRemaining -= Time.deltaTime;
                 if (timeRemaining <= 0f)
@@ -634,7 +677,7 @@ public class DragonBoss : MonoBehaviour
                 timeRemaining = 0f;
             }
 
-            if (fightUI != null)
+            if (fightUI != null && !survivalModeActive)
             {
                 if (overtimeChase)
                 {
@@ -697,7 +740,142 @@ public class DragonBoss : MonoBehaviour
     /// <summary>Begin a timed fight from the world-space Start panel.</summary>
     public void StartFight()
     {
+        survivalModeActive = false;
+        survivalMode = null;
+        survivalElapsed = 0f;
         ResetFightState(beginPlaying: true);
+    }
+
+    /// <summary>Arcade survival — endless fireballs, invulnerable shield crystals.</summary>
+    public void StartSurvivalFight(DragonSurvivalMode mode)
+    {
+        survivalMode = mode;
+        survivalModeActive = mode != null;
+        survivalElapsed = 0f;
+        if (mode != null)
+        {
+            survivalIntervalStart = mode.StartFireballInterval;
+            survivalIntervalMin = mode.MinFireballInterval;
+            survivalSpeedStart = mode.StartFireballSpeed;
+            survivalSpeedMax = mode.MaxFireballSpeed;
+            survivalEscalationRampSeconds = mode.EscalationRampSeconds;
+            survivalIntervalVariance = mode.FireballIntervalVariance;
+            survivalSpeedVariance = mode.FireballSpeedVariance;
+            survivalPathSpeedVariance = mode.DragonPathSpeedVariance;
+            survivalAimOffsetRadius = mode.AimOffsetRadius;
+            survivalSpawnOffsetRadius = mode.SpawnOffsetRadius;
+            survivalFirstDelayVariance = mode.FirstFireballDelayVariance;
+        }
+        else
+        {
+            survivalIntervalVariance = 0f;
+            survivalSpeedVariance = 0f;
+            survivalPathSpeedVariance = 0f;
+            survivalAimOffsetRadius = 0f;
+            survivalSpawnOffsetRadius = 0f;
+            survivalFirstDelayVariance = 0f;
+        }
+
+        survivalPathSpeedMultiplier = SampleSurvivalVarianceMultiplier(survivalPathSpeedVariance);
+        survivalPathSpeedRefreshTime = Time.time + Random.Range(6f, 14f);
+
+        ResetFightState(beginPlaying: true);
+        float firstDelay = mode != null ? mode.FirstFireballDelay : survivalFirstFireballDelay;
+        firstDelay *= SampleSurvivalVarianceMultiplier(survivalFirstDelayVariance);
+        nextFireballTime = Time.time + Mathf.Max(0f, firstDelay);
+        ApplySurvivalCrystalProtection(true);
+    }
+
+    /// <summary>Leave survival arcade and restore normal crystal combat.</summary>
+    public void EndSurvivalFight()
+    {
+        if (!survivalModeActive && survivalMode == null)
+        {
+            return;
+        }
+
+        survivalModeActive = false;
+        survivalMode = null;
+        survivalElapsed = 0f;
+        survivalPathSpeedMultiplier = 1f;
+        survivalPathSpeedRefreshTime = 0f;
+        ApplySurvivalCrystalProtection(false);
+        if (phase == FightPhase.Playing || phase == FightPhase.Ended)
+        {
+            ResetFightState(beginPlaying: false);
+        }
+    }
+
+    private float GetSurvivalFireballInterval()
+    {
+        float ramp = Mathf.Max(1f, survivalEscalationRampSeconds);
+        float t = Mathf.Clamp01(survivalElapsed / ramp);
+        return Mathf.Lerp(survivalIntervalStart, survivalIntervalMin, t);
+    }
+
+    private float GetSurvivalFireballSpeed()
+    {
+        float ramp = Mathf.Max(1f, survivalEscalationRampSeconds);
+        float t = Mathf.Clamp01(survivalElapsed / ramp);
+        return Mathf.Lerp(survivalSpeedStart, survivalSpeedMax, t);
+    }
+
+    private float GetNextSurvivalFireballDelay()
+    {
+        return GetSurvivalFireballInterval()
+            * SampleSurvivalVarianceMultiplier(survivalIntervalVariance);
+    }
+
+    private static float SampleSurvivalVarianceMultiplier(float varianceFraction)
+    {
+        if (varianceFraction <= 0f)
+        {
+            return 1f;
+        }
+
+        return Random.Range(1f - varianceFraction, 1f + varianceFraction);
+    }
+
+    private void RefreshSurvivalPathSpeedMultiplierIfNeeded()
+    {
+        if (Time.time < survivalPathSpeedRefreshTime)
+        {
+            return;
+        }
+
+        survivalPathSpeedMultiplier = SampleSurvivalVarianceMultiplier(survivalPathSpeedVariance);
+        survivalPathSpeedRefreshTime = Time.time + Random.Range(6f, 14f);
+    }
+
+    private Vector3 SampleSurvivalAimOffset()
+    {
+        if (survivalAimOffsetRadius <= 0f)
+        {
+            return Vector3.zero;
+        }
+
+        return Random.insideUnitSphere * survivalAimOffsetRadius;
+    }
+
+    private Vector3 SampleSurvivalSpawnOffset()
+    {
+        if (survivalSpawnOffsetRadius <= 0f)
+        {
+            return Vector3.zero;
+        }
+
+        return Random.insideUnitSphere * survivalSpawnOffsetRadius;
+    }
+
+    private void ApplySurvivalCrystalProtection(bool enabled)
+    {
+        for (int i = 0; i < crystals.Count; i++)
+        {
+            if (crystals[i] != null)
+            {
+                crystals[i].SetInvulnerable(enabled);
+            }
+        }
     }
 
     /// <summary>Chosen by which difficulty quiver is strapped on before the fight.</summary>
@@ -947,6 +1125,26 @@ public class DragonBoss : MonoBehaviour
             return;
         }
 
+        if (survivalModeActive && survivalMode != null)
+        {
+            phase = FightPhase.Ended;
+            overtimeChase = false;
+            ClearFireballs();
+            FightAudio.SetDragonFlying(false);
+            SetAnimatorRunning(true, aliveAnimSpeed);
+            survivalMode.OnPlayerDefeated(survivalElapsed);
+
+            if (logStateChanges)
+            {
+                Debug.Log(
+                    "DragonBoss: survival ended — "
+                    + Mathf.FloorToInt(survivalElapsed) + "s survived.",
+                    this);
+            }
+
+            return;
+        }
+
         phase = FightPhase.Ended;
         overtimeChase = false;
         SetAnimatorRunning(false);
@@ -969,13 +1167,18 @@ public class DragonBoss : MonoBehaviour
 
     private void UpdateFireballs()
     {
-        if (!enableFireballs || !IsFightActive || overtimeChase)
+        if (!enableFireballs || !IsFightActive)
+        {
+            return;
+        }
+
+        if (!survivalModeActive && overtimeChase)
         {
             return;
         }
 
         // Quiet window before overtime so a fireball isn't still inbound with the dragon.
-        if (timeRemaining <= fireballLockoutBeforeTimerEnd)
+        if (!survivalModeActive && timeRemaining <= fireballLockoutBeforeTimerEnd)
         {
             return;
         }
@@ -986,14 +1189,16 @@ public class DragonBoss : MonoBehaviour
         }
 
         // Wait in the spawn band (center X of bounds) instead of wasting a long cooldown.
-        if (!IsFireballSpawnPositionAllowed(ResolveFireballSpawnPosition()))
+        if (!survivalModeActive && !IsFireballSpawnPositionAllowed(ResolveFireballSpawnPosition()))
         {
             return;
         }
 
-        nextFireballTime = Time.time + ActiveFireballInterval;
+        nextFireballTime = survivalModeActive
+            ? Time.time + GetNextSurvivalFireballDelay()
+            : Time.time + ActiveFireballInterval;
 
-        if (Random.value > fireballChance)
+        if (!survivalModeActive && Random.value > fireballChance)
         {
             return;
         }
@@ -1035,8 +1240,23 @@ public class DragonBoss : MonoBehaviour
     private void TrySpawnFireball()
     {
         DragonFireballSettings spawnSettings = ResolveActiveFireballSettings();
+        if (survivalModeActive && survivalSpeedVariance > 0f)
+        {
+            spawnSettings.speed *= SampleSurvivalVarianceMultiplier(survivalSpeedVariance);
+        }
+
         Vector3 spawnPos = ResolveFireballSpawnPosition();
+        if (survivalModeActive)
+        {
+            spawnPos += SampleSurvivalSpawnOffset();
+        }
+
         Vector3 target = PlayEnvironment.ResolvePlayerAimPosition();
+        if (survivalModeActive)
+        {
+            target += SampleSurvivalAimOffset();
+        }
+
         Vector3 dir = target - spawnPos;
         if (dir.sqrMagnitude < 1e-4f)
         {
@@ -1158,7 +1378,8 @@ public class DragonBoss : MonoBehaviour
     {
         liveCrystals.RemoveAll(c => c == null || !c.IsAlive);
 
-        bool shouldShieldFunctional = phase == FightPhase.Playing && !dead && !isDying && liveCrystals.Count > 0;
+        bool shouldShieldFunctional = phase == FightPhase.Playing && !dead && !isDying
+            && (survivalModeActive || liveCrystals.Count > 0);
         bool shouldShieldVisual = ShouldShowCrystalShieldVisual;
 
         if (shouldShieldFunctional != shieldUp)
@@ -1253,7 +1474,7 @@ public class DragonBoss : MonoBehaviour
 
     private void TakeDamage(int amount)
     {
-        if (!IsFightActive || amount <= 0)
+        if (survivalModeActive || !IsFightActive || amount <= 0)
         {
             return;
         }
@@ -1301,7 +1522,7 @@ public class DragonBoss : MonoBehaviour
 
     private void BeginDeathSequence()
     {
-        if (dead || isDying || phase != FightPhase.Playing)
+        if (survivalModeActive || dead || isDying || phase != FightPhase.Playing)
         {
             return;
         }

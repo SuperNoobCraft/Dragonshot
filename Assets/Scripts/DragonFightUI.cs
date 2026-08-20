@@ -21,8 +21,13 @@ public class DragonFightUI : MonoBehaviour
     [SerializeField] private DragonBoss dragon;
     [Tooltip("Optional. Auto-added: top-left HUD under vGear/Frame/Info/InfoUI.")]
     [SerializeField] private DragonFightInfoHud infoHud;
-    [Tooltip("Secret crystal target practice (panel click before bow pick).")]
+    [Tooltip("Secret crystal target practice (arcade Target Test quiver).")]
     [SerializeField] private CrystalTargetPractice targetPractice;
+    [Tooltip("Secret survival arcade (Survival quiver).")]
+    [SerializeField] private DragonSurvivalMode survivalMode;
+    [Tooltip("Secret arcade hub (panel click at START). Optional — entry works without it.")]
+    [SerializeField] private ArcadeMode arcadeMode;
+    [SerializeField] private DragonFightEquipStart equipStart;
 
     [Header("Display")]
     [SerializeField] private TextMesh label;
@@ -71,6 +76,16 @@ public class DragonFightUI : MonoBehaviour
     [Tooltip("Top-left InfoUI HUD during overtime. {0}=current HP, {1}=max HP")]
     [SerializeField] private string infoHudOvertimeText = "ENRAGED\nHP {0}/{1}";
 
+    [Header("Secret Arcade")]
+    [TextArea(2, 3)]
+    [Tooltip("Panel click at START before bow pickup.")]
+    [SerializeField] private string arcadeWaitingText =
+        "ARCADE\nPick up the bow\n(no scope)";
+    [TextArea(2, 3)]
+    [Tooltip("After bow — choose Target Test or Survival quiver.")]
+    [SerializeField] private string arcadeQuiverPickText =
+        "ARCADE\nTarget Test or Survival";
+
     [Header("Secret Target Practice")]
     [TextArea(2, 3)]
     [Tooltip("After secret panel click, before bow pickup. {0}=saved high score")]
@@ -87,6 +102,19 @@ public class DragonFightUI : MonoBehaviour
     [TextArea(2, 3)]
     [Tooltip("Info HUD during practice. {0}=seconds left, {1}=score")]
     [SerializeField] private string infoHudTargetPracticeText = "TIME {0}\nSCORE {1}";
+
+    [Header("Secret Survival Arcade")]
+    [TextArea(2, 4)]
+    [Tooltip("During survival. {0}=seconds survived, {1}=best seconds")]
+    [SerializeField] private string survivalPlayingPanelText =
+        "SURVIVED {0}s\nBEST {1}s\n(click to reset)";
+    [TextArea(2, 4)]
+    [Tooltip("When hit by a fireball. {0}=seconds survived, {1}=best seconds")]
+    [SerializeField] private string survivalResultsPanelText =
+        "ELIMINATED\n{0}s survived\nBEST {1}s\n(click to reset)";
+    [TextArea(2, 3)]
+    [Tooltip("Info HUD during survival. {0}=seconds survived")]
+    [SerializeField] private string infoHudSurvivalText = "SURVIVED {0}s";
 
     [Header("Interact")]
     [SerializeField] private bool instructionOnlyBeforeFight = true;
@@ -142,6 +170,17 @@ public class DragonFightUI : MonoBehaviour
             targetPractice = FindObjectOfType<CrystalTargetPractice>();
         }
 
+        if (survivalMode == null)
+        {
+            survivalMode = FindObjectOfType<DragonSurvivalMode>();
+        }
+
+        if (arcadeMode == null)
+        {
+            arcadeMode = FindObjectOfType<ArcadeMode>();
+        }
+
+        ResolveEquipStart();
         EnsureLabel();
         EnsureInteractable();
         EnsureInfoHud();
@@ -175,9 +214,21 @@ public class DragonFightUI : MonoBehaviour
             targetPractice = FindObjectOfType<CrystalTargetPractice>();
         }
 
+        if (survivalMode == null)
+        {
+            survivalMode = FindObjectOfType<DragonSurvivalMode>();
+        }
+
+        if (arcadeMode == null)
+        {
+            arcadeMode = FindObjectOfType<ArcadeMode>();
+        }
+
+        ResolveEquipStart();
+
         if (instructionOnly && !allowResetDuringEquip && state == PanelState.Start)
         {
-            HandleSecretPracticeClickInput();
+            HandleArcadeClickInput();
             return;
         }
 
@@ -211,23 +262,13 @@ public class DragonFightUI : MonoBehaviour
         }
     }
 
-    private void HandleSecretPracticeClickInput()
+    private void HandleArcadeClickInput()
     {
-        if (targetPractice == null || !targetPractice.CanAcceptSecretEntry)
-        {
-            if (!PlayEnvironment.IsDesktopInput)
-            {
-                wasTriggerHeld = IsTriggerHeld();
-            }
-
-            return;
-        }
-
         if (PlayEnvironment.IsDesktopInput)
         {
             if (Input.GetMouseButtonDown(0) && IsCursorOverPanel())
             {
-                targetPractice.TryEnterFromSecretClick();
+                TryEnterArcadeFromPanelClick();
             }
         }
         else
@@ -237,9 +278,84 @@ public class DragonFightUI : MonoBehaviour
             wasTriggerHeld = held;
             if (pressed && IsWandTargetingPanel())
             {
-                targetPractice.TryEnterFromSecretClick();
+                TryEnterArcadeFromPanelClick();
             }
         }
+    }
+
+    private void ResolveEquipStart()
+    {
+        if (equipStart == null)
+        {
+            equipStart = FindObjectOfType<DragonFightEquipStart>();
+        }
+    }
+
+    private bool CanEnterArcadeFromPanel()
+    {
+        if (equipStart == null)
+        {
+            return false;
+        }
+
+        if (equipStart.IsArcadeModeActive || equipStart.IsBowEquipped)
+        {
+            return false;
+        }
+
+        if (!equipStart.CanStartArcadeEntry)
+        {
+            return false;
+        }
+
+        if (targetPractice != null && targetPractice.IsActive)
+        {
+            return false;
+        }
+
+        if (survivalMode != null && survivalMode.IsActive)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryEnterArcadeFromPanelClick()
+    {
+        if (arcadeMode != null && arcadeMode.CanEnterFromPanel)
+        {
+            return arcadeMode.TryEnterFromPanelClick();
+        }
+
+        if (!CanEnterArcadeFromPanel())
+        {
+            return false;
+        }
+
+        equipStart.EnterArcadeMode();
+        ShowArcadeWaiting();
+        return true;
+    }
+
+    public void ShowArcadeWaiting()
+    {
+        SetDefeatTint(false);
+        instructionOnly = true;
+        allowResetDuringEquip = false;
+        state = PanelState.Start;
+        SetText(arcadeWaitingText);
+        HideInfoHud();
+    }
+
+    public void ShowArcadeQuiverPick()
+    {
+        SetDefeatTint(false);
+        instructionOnly = true;
+        allowResetDuringEquip = false;
+        state = PanelState.Start;
+        SetText(arcadeQuiverPickText);
+        HideInfoHud();
     }
 
     public void ShowTargetPracticeWaiting(int bestScore)
@@ -269,6 +385,30 @@ public class DragonFightUI : MonoBehaviour
         allowResetDuringEquip = false;
         state = PanelState.Timeout;
         SetText(FormatTemplate(targetPracticeResultsPanelText, currentScore, bestScore));
+        HideInfoHud();
+    }
+
+    public void ShowSurvivalPlaying(float secondsSurvived, float bestSeconds)
+    {
+        SetDefeatTint(false);
+        instructionOnly = false;
+        allowResetDuringEquip = false;
+        state = PanelState.Playing;
+        string survived = FormatSurvivalTime(secondsSurvived);
+        string best = FormatSurvivalTime(bestSeconds);
+        SetText(FormatTemplate(survivalPlayingPanelText, survived, best));
+        EnsureInfoHud().ShowText(FormatTemplate(infoHudSurvivalText, survived));
+    }
+
+    public void ShowSurvivalResults(float secondsSurvived, float bestSeconds)
+    {
+        SetDefeatTint(false);
+        instructionOnly = false;
+        allowResetDuringEquip = false;
+        state = PanelState.Defeat;
+        string survived = FormatSurvivalTime(secondsSurvived);
+        string best = FormatSurvivalTime(bestSeconds);
+        SetText(FormatTemplate(survivalResultsPanelText, survived, best));
         HideInfoHud();
     }
 
@@ -500,6 +640,11 @@ public class DragonFightUI : MonoBehaviour
         }
     }
 
+    private static string FormatSurvivalTime(float seconds)
+    {
+        return Mathf.Max(0f, seconds).ToString("F2");
+    }
+
     private static string FormatTemplate(string template, params object[] args)
     {
         if (string.IsNullOrEmpty(template))
@@ -525,6 +670,12 @@ public class DragonFightUI : MonoBehaviour
             return;
         }
 
+        if (survivalMode != null && survivalMode.IsActive)
+        {
+            survivalMode.OnPanelClicked();
+            return;
+        }
+
         if (dragon == null)
         {
             return;
@@ -535,6 +686,11 @@ public class DragonFightUI : MonoBehaviour
             if (allowResetDuringEquip)
             {
                 dragon.ResetFight();
+                return;
+            }
+
+            if (TryEnterArcadeFromPanelClick())
+            {
                 return;
             }
 

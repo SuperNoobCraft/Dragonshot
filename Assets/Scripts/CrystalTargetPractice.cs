@@ -4,8 +4,8 @@ using System.IO;
 using UnityEngine;
 
 /// <summary>
-/// Secret crystal target practice: enter by clicking the fight panel before picking a bow.
-/// No dragon — crystals spawn in an assignable box; the next crystal ghost shows outline only.
+/// Secret crystal target practice (arcade): crystals spawn in an assignable box;
+/// enter via <see cref="ArcadeMode"/> → Target Test quiver.
 /// </summary>
 public class CrystalTargetPractice : MonoBehaviour
 {
@@ -106,7 +106,6 @@ public class CrystalTargetPractice : MonoBehaviour
 
     public bool IsActive => phase != Phase.Inactive;
     public bool IsPlaying => phase == Phase.Playing;
-    public bool CanAcceptSecretEntry => phase == Phase.Inactive && equipStart != null && !equipStart.IsBowEquipped;
     public int Score => score;
     public int HighScore => highScore;
     public float TimeRemaining => timeRemaining;
@@ -148,16 +147,18 @@ public class CrystalTargetPractice : MonoBehaviour
         }
     }
 
-    /// <summary>Called from DragonFightUI when the panel is clicked during equip step 1.</summary>
-    public bool TryEnterFromSecretClick()
+    /// <summary>Called from DragonFightEquipStart when the Target Test quiver is picked.</summary>
+    public void PrepareForArcade()
     {
-        if (!CanAcceptSecretEntry)
-        {
-            return false;
-        }
+        ResolveReferences();
+        LoadHighScore();
 
-        EnterMode();
-        return true;
+        phase = Phase.WaitingForBow;
+        score = 0;
+        timeRemaining = 0f;
+        ClearSpawnedCrystals();
+        SuppressDragonFight(true);
+        EnableInfiniteArrowsIfNeeded();
     }
 
     /// <summary>Called from DragonFightEquipStart after quiver is mounted on back.</summary>
@@ -189,30 +190,6 @@ public class CrystalTargetPractice : MonoBehaviour
         emergingCrystals.Remove(crystal);
         BeginSinkPillar(crystal);
         RefreshPlayingUi();
-    }
-
-    public void EnterMode()
-    {
-        ResolveReferences();
-        LoadHighScore();
-
-        phase = Phase.WaitingForBow;
-        score = 0;
-        timeRemaining = 0f;
-        ClearSpawnedCrystals();
-
-        SuppressDragonFight(true);
-        EnableInfiniteArrowsIfNeeded();
-
-        if (equipStart != null)
-        {
-            equipStart.EnterTargetPracticeMode();
-        }
-
-        if (fightUI != null)
-        {
-            fightUI.ShowTargetPracticeWaiting(highScore);
-        }
     }
 
     public void ExitMode()

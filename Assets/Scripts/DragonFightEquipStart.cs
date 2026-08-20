@@ -1,4 +1,5 @@
 using System.Collections;
+using TMPro;
 using UnityEngine;
 using Votanic.vXR.vCast;
 
@@ -60,8 +61,10 @@ public class DragonFightEquipStart : MonoBehaviour
     [Tooltip("Legacy single reference: used as ground and/or held quiver if the fields above are empty.")]
     [SerializeField] private Transform groundQuiver;
     [SerializeField] private DragonFightUI fightUI;
-    [Tooltip("Secret crystal target practice (panel click before bow pick).")]
+    [Tooltip("Secret crystal target practice (arcade Target Test quiver).")]
     [SerializeField] private CrystalTargetPractice targetPractice;
+    [Tooltip("Secret survival arcade (Survival quiver).")]
+    [SerializeField] private DragonSurvivalMode survivalMode;
     [Tooltip("World-space instruction signs that rise for equip and sink when the fight begins.")]
     [SerializeField] private GameObject[] instructionSigns;
     [Tooltip("How far below rest height signs bury (meters).")]
@@ -95,6 +98,10 @@ public class DragonFightEquipStart : MonoBehaviour
     [SerializeField, Min(0f)] private float quiverPickupDelayAfterAppear = 0.5f;
     [Tooltip("Scale-from-zero appear animation length for bows / quivers.")]
     [SerializeField, Min(0.05f)] private float propAppearScaleSeconds = 0.28f;
+
+    [Header("Arcade Mode")]
+    [SerializeField] private string arcadeTargetTestLabel = "Target Test";
+    [SerializeField] private string arcadeSurvivalLabel = "Survival";
 
     [Header("Quiver Attach")]
     [SerializeField] private Vector3 quiverHandLocalPosition = new Vector3(0.06f, -0.04f, 0.12f);
@@ -174,6 +181,8 @@ public class DragonFightEquipStart : MonoBehaviour
     private bool startedFight;
     private bool quiverHeld;
     private bool targetPracticeActive;
+    private bool survivalActive;
+    private bool arcadeModeActive;
     private bool quiverPickupUnlocked;
     private Coroutine quiverRevealRoutine;
     private readonly System.Collections.Generic.Dictionary<Transform, Vector3> propBaseScales =
@@ -185,6 +194,9 @@ public class DragonFightEquipStart : MonoBehaviour
     public bool IsBowEquipped => phase != EquipPhase.NeedBow;
     public bool IsQuiverMounted => phase == EquipPhase.Complete;
     public bool IsTargetPracticeActive => targetPracticeActive;
+    public bool IsSurvivalActive => survivalActive;
+    public bool IsArcadeModeActive => arcadeModeActive;
+    public bool CanStartArcadeEntry => dragon == null || dragon.IsWaitingForStart;
     public FightDifficulty SelectedDifficulty => selectedDifficulty;
 
     /// <summary>
@@ -364,7 +376,14 @@ public class DragonFightEquipStart : MonoBehaviour
             targetPractice.ForceStopWithoutEquipReset();
         }
 
+        if (survivalMode != null && survivalMode.IsActive)
+        {
+            survivalMode.ForceStopWithoutEquipReset();
+        }
+
         targetPracticeActive = false;
+        survivalActive = false;
+        arcadeModeActive = false;
         ResolveReferences();
         EnsureDifficultyQuiversMigrated();
         EnsureGroundBowsMigrated();
@@ -401,10 +420,12 @@ public class DragonFightEquipStart : MonoBehaviour
         RefreshInstructionsIfNeeded();
     }
 
-    /// <summary>Secret target practice: no dragon, no scope bow; Normal quiver only after bow.</summary>
-    public void EnterTargetPracticeMode()
+    /// <summary>Secret arcade hub: no-scope bow, then Target Test / Survival quivers.</summary>
+    public void EnterArcadeMode()
     {
-        targetPracticeActive = true;
+        arcadeModeActive = true;
+        targetPracticeActive = false;
+        survivalActive = false;
         phase = EquipPhase.NeedBow;
         lastInstructionPhase = (EquipPhase)(-1);
         dwell = 0f;
@@ -576,7 +597,7 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void TryDesktopPickBow(bool withScope)
     {
-        if (targetPracticeActive && withScope)
+        if ((targetPracticeActive || arcadeModeActive) && withScope)
         {
             return;
         }
@@ -600,7 +621,14 @@ public class DragonFightEquipStart : MonoBehaviour
 
     private void TryDesktopPickDifficulty(FightDifficulty difficulty)
     {
-        if (targetPracticeActive && difficulty != FightDifficulty.Normal)
+        if (arcadeModeActive)
+        {
+            if (difficulty != FightDifficulty.Easy && difficulty != FightDifficulty.Hard)
+            {
+                return;
+            }
+        }
+        else if (targetPracticeActive && difficulty != FightDifficulty.Normal)
         {
             return;
         }
@@ -621,7 +649,7 @@ public class DragonFightEquipStart : MonoBehaviour
             return;
         }
 
-        if (targetPracticeActive)
+        if (targetPracticeActive || arcadeModeActive)
         {
             if (groundBows[index].withScope)
             {
@@ -630,7 +658,8 @@ public class DragonFightEquipStart : MonoBehaviour
         }
 
         selectedBowIndex = index;
-        bool withScope = !targetPracticeActive
+        bool withScope = !arcadeModeActive
+            && !targetPracticeActive
             && groundBows[index] != null
             && groundBows[index].withScope;
 
@@ -670,7 +699,11 @@ public class DragonFightEquipStart : MonoBehaviour
             yield break;
         }
 
-        if (targetPracticeActive)
+        if (arcadeModeActive)
+        {
+            ShowArcadeGroundQuivers(animateAppear: true);
+        }
+        else if (targetPracticeActive)
         {
             ShowNormalGroundQuiverOnly(animateAppear: true);
         }
@@ -709,7 +742,29 @@ public class DragonFightEquipStart : MonoBehaviour
             return;
         }
 
-        if (targetPracticeActive)
+        if (arcadeModeActive)
+        {
+            int targetIndex = IndexOfDifficulty(FightDifficulty.Easy);
+            int survivalIndex = IndexOfDifficulty(FightDifficulty.Hard);
+            if (index != targetIndex && index != survivalIndex)
+            {
+                return;
+            }
+
+            if (index == targetIndex)
+            {
+                targetPracticeActive = true;
+                if (targetPractice != null)
+                {
+                    targetPractice.PrepareForArcade();
+                }
+            }
+            else
+            {
+                survivalActive = true;
+            }
+        }
+        else if (targetPracticeActive)
         {
             int normalIndex = IndexOfDifficulty(FightDifficulty.Normal);
             if (normalIndex >= 0 && index != normalIndex)
@@ -801,7 +856,7 @@ public class DragonFightEquipStart : MonoBehaviour
             selectedDifficulty = difficultyQuivers[selectedQuiverIndex].difficulty;
         }
 
-        if (dragon != null && !targetPracticeActive)
+        if (dragon != null && !targetPracticeActive && !survivalActive && !arcadeModeActive)
         {
             dragon.SetDifficulty(selectedDifficulty);
         }
@@ -918,6 +973,19 @@ public class DragonFightEquipStart : MonoBehaviour
             startedFight = true;
             SetInstructionSignsVisible(false);
             targetPractice.OnQuiverMounted();
+            return;
+        }
+
+        if (survivalActive)
+        {
+            if (survivalMode == null)
+            {
+                return;
+            }
+
+            startedFight = true;
+            SetInstructionSignsVisible(false);
+            survivalMode.OnQuiverMounted();
             return;
         }
 
@@ -1132,8 +1200,142 @@ public class DragonFightEquipStart : MonoBehaviour
         t.localRotation = pose.localRotation;
     }
 
+    private void ShowArcadeGroundQuivers(bool animateAppear = false)
+    {
+        int targetIndex = IndexOfDifficulty(FightDifficulty.Easy);
+        int survivalIndex = IndexOfDifficulty(FightDifficulty.Hard);
+        CacheLabelPosesIfNeeded();
+
+        for (int i = 0; i < DifficultyQuiverCount; i++)
+        {
+            bool show = i == targetIndex || i == survivalIndex;
+            GameObject prop = GetQuiverGroundObject(i);
+            if (prop != null)
+            {
+                if (show)
+                {
+                    PlaceQuiverOnGround(i, animateAppear);
+                }
+                else
+                {
+                    RestorePropBaseScale(prop.transform);
+                    prop.SetActive(false);
+                }
+            }
+
+            if (show)
+            {
+                string labelText = i == targetIndex ? arcadeTargetTestLabel : arcadeSurvivalLabel;
+                SetDifficultyLabelText(i, labelText);
+            }
+
+            SetDifficultyLabelVisible(i, show);
+        }
+
+        ApplyArcadeLabelsBySceneNames();
+    }
+
+    private void ApplyArcadeLabelsBySceneNames()
+    {
+        ApplyLabelTextBySceneName("Easy", arcadeTargetTestLabel);
+        ApplyLabelTextBySceneName("Hard", arcadeSurvivalLabel);
+    }
+
+    private void ApplyLabelTextBySceneName(string difficultyName, string text)
+    {
+        if (string.IsNullOrEmpty(difficultyName) || string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        Transform[] transforms = GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < transforms.Length; i++)
+        {
+            Transform t = transforms[i];
+            if (t == null)
+            {
+                continue;
+            }
+
+            string objectName = t.name;
+            if (objectName.IndexOf("Label", System.StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                continue;
+            }
+
+            if (objectName.IndexOf(difficultyName, System.StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                continue;
+            }
+
+            ApplyTextToLabelObject(t.gameObject, text);
+        }
+    }
+
+    private void SetDifficultyLabelText(int index, string text)
+    {
+        if (!IsValidQuiverIndex(index) || string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        DifficultyQuiver option = difficultyQuivers[index];
+        ApplyTextToLabelObject(option.label, text);
+
+        GameObject ground = GetQuiverGroundObject(index);
+        if (ground != null)
+        {
+            ApplyTextToLabelObject(ground, text);
+        }
+
+        if (option.groundAnchor != null)
+        {
+            ApplyTextToLabelObject(option.groundAnchor.gameObject, text);
+        }
+    }
+
+    private static void ApplyTextToLabelObject(GameObject root, string text)
+    {
+        if (root == null)
+        {
+            return;
+        }
+
+        TextMesh[] meshes = root.GetComponentsInChildren<TextMesh>(true);
+        for (int i = 0; i < meshes.Length; i++)
+        {
+            if (meshes[i] != null)
+            {
+                meshes[i].text = text;
+            }
+        }
+
+        TMP_Text[] tmpLabels = root.GetComponentsInChildren<TMP_Text>(true);
+        for (int i = 0; i < tmpLabels.Length; i++)
+        {
+            if (tmpLabels[i] != null)
+            {
+                tmpLabels[i].text = text;
+            }
+        }
+    }
+
+    private void RestoreDifficultyLabelTexts()
+    {
+        for (int i = 0; i < DifficultyQuiverCount; i++)
+        {
+            if (!IsValidQuiverIndex(i))
+            {
+                continue;
+            }
+
+            SetDifficultyLabelText(i, difficultyQuivers[i].difficulty.ToString());
+        }
+    }
+
     private void ShowAllGroundQuivers(bool animateAppear = false)
     {
+        RestoreDifficultyLabelTexts();
         for (int i = 0; i < DifficultyQuiverCount; i++)
         {
             PlaceQuiverOnGround(i, animateAppear);
@@ -2035,7 +2237,7 @@ public class DragonFightEquipStart : MonoBehaviour
 
         for (int i = 0; i < GroundBowCount; i++)
         {
-            if (targetPracticeActive && IsValidBowIndex(i) && groundBows[i].withScope)
+            if ((targetPracticeActive || arcadeModeActive) && IsValidBowIndex(i) && groundBows[i].withScope)
             {
                 continue;
             }
@@ -2193,7 +2395,31 @@ public class DragonFightEquipStart : MonoBehaviour
             return;
         }
 
-        // Waiting-for-bow copy is owned by CrystalTargetPractice.
+        // Waiting-for-bow / quiver copy is owned by ArcadeMode + sub-modes.
+        if (arcadeModeActive)
+        {
+            if (fightUI == null)
+            {
+                return;
+            }
+
+            lastInstructionPhase = phase;
+            if (phase == EquipPhase.NeedBow)
+            {
+                fightUI.ShowArcadeWaiting();
+            }
+            else if (phase == EquipPhase.NeedQuiverPickup)
+            {
+                fightUI.ShowArcadeQuiverPick();
+            }
+            else
+            {
+                fightUI.ShowEquipStep(phase == EquipPhase.NeedQuiverBack ? 3 : 1);
+            }
+
+            return;
+        }
+
         if (targetPracticeActive && phase == EquipPhase.NeedBow)
         {
             return;
@@ -2610,6 +2836,11 @@ public class DragonFightEquipStart : MonoBehaviour
         if (targetPractice == null)
         {
             targetPractice = FindObjectOfType<CrystalTargetPractice>();
+        }
+
+        if (survivalMode == null)
+        {
+            survivalMode = FindObjectOfType<DragonSurvivalMode>();
         }
     }
 

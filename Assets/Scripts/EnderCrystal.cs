@@ -56,6 +56,7 @@ public class EnderCrystal : MonoBehaviour
     private LineRenderer beam;
     private bool destroyed;
     private bool combatActive = true;
+    private bool invulnerable;
     private CrystalTargetPractice practiceGame;
     private bool practicePreview;
     private GrowMode growMode = GrowMode.None;
@@ -65,6 +66,7 @@ public class EnderCrystal : MonoBehaviour
     private Transform visualRoot;
     private Transform innerSpin;
     private Transform outerSpin;
+    private Transform survivalShieldRoot;
     private Vector3 visualBaseLocalPos;
     private bool hasCachedVisualBaseLocalPos;
     private Vector3 innerSpinBaseScale = Vector3.one;
@@ -80,6 +82,26 @@ public class EnderCrystal : MonoBehaviour
     public bool IsRegenerating => growMode == GrowMode.HardRegrow;
     public bool IsEmerging => growMode != GrowMode.None;
     public bool IsPracticePreview => practicePreview;
+    public bool IsInvulnerable => invulnerable;
+
+    /// <summary>Survival arcade: arrows bounce off; metal cage stays up.</summary>
+    public void SetInvulnerable(bool value)
+    {
+        if (invulnerable == value)
+        {
+            return;
+        }
+
+        invulnerable = value;
+        if (value)
+        {
+            ApplySurvivalProtectionVisual();
+        }
+        else
+        {
+            RestoreSurvivalProtectionVisual();
+        }
+    }
 
     /// <summary>Runtime crystal for secret target practice (no dragon / shield).</summary>
     public void BindForPractice(CrystalTargetPractice owner, bool preview)
@@ -447,6 +469,85 @@ public class EnderCrystal : MonoBehaviour
         visualRoot.gameObject.SetActive(true);
     }
 
+    private void BounceArrowOffCage(Collider other)
+    {
+        if (other == null)
+        {
+            return;
+        }
+
+        ArrowProjectile arrow = other.GetComponentInParent<ArrowProjectile>();
+        if (arrow == null || (!arrow.IsInFlight && !arrow.HasStuck))
+        {
+            return;
+        }
+
+        Vector3 hitPoint = arrow.Tip != null ? arrow.Tip.position : arrow.transform.position;
+        Vector3 outward = hitPoint - transform.position;
+        if (outward.sqrMagnitude < 1e-4f)
+        {
+            outward = hitPoint - PlayEnvironment.ResolvePlayerAimPosition();
+        }
+
+        if (outward.sqrMagnitude < 1e-4f)
+        {
+            outward = Vector3.up;
+        }
+
+        FightAudio.PlayShieldBounce(hitPoint);
+        arrow.BounceOffSurface(hitPoint, outward.normalized, 0.55f);
+    }
+
+    private void ApplySurvivalProtectionVisual()
+    {
+        if (autoBuildVisual)
+        {
+            EnsureCrystalVisual();
+        }
+
+        EnsureSurvivalShieldVisual();
+    }
+
+    private void EnsureSurvivalShieldVisual()
+    {
+        if (visualRoot == null)
+        {
+            return;
+        }
+
+        if (survivalShieldRoot == null)
+        {
+            GameObject root = new GameObject("SurvivalShield");
+            root.transform.SetParent(visualRoot, false);
+            survivalShieldRoot = root.transform;
+            survivalShieldRoot.localScale = Vector3.one * cageScale * 1.2f;
+
+            Mesh dodeca = CrystalGeometry.CreateDodecahedronMesh();
+            GameObject shell = new GameObject("ShieldShell");
+            shell.transform.SetParent(survivalShieldRoot, false);
+            MeshFilter filter = shell.AddComponent<MeshFilter>();
+            filter.sharedMesh = dodeca;
+            MeshRenderer renderer = shell.AddComponent<MeshRenderer>();
+            Color shieldTint = Color.Lerp(cageAccentColor, Color.white, 0.45f);
+            shieldTint.a = 1f;
+            Material shieldMat = CreateOutlineMaterial(shieldTint, 0.06f);
+            TrackMaterial(shieldMat);
+            renderer.sharedMaterial = shieldMat;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+        }
+
+        survivalShieldRoot.gameObject.SetActive(true);
+    }
+
+    private void RestoreSurvivalProtectionVisual()
+    {
+        if (survivalShieldRoot != null)
+        {
+            survivalShieldRoot.gameObject.SetActive(false);
+        }
+    }
+
     private static int ResolveArrowStickableLayer()
     {
         int layer = LayerMask.NameToLayer("ArrowStickable");
@@ -744,6 +845,12 @@ public class EnderCrystal : MonoBehaviour
 
         if (practicePreview)
         {
+            return;
+        }
+
+        if (invulnerable)
+        {
+            BounceArrowOffCage(other);
             return;
         }
 
