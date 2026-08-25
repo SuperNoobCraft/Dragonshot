@@ -10,8 +10,8 @@ public struct DragonFireballSettings
     [Header("Motion")]
     [Min(0.5f)] public float speed;
     [Min(1f)] public float lifetime;
-    [Tooltip("Hit radius around the player's eyes / aim point.")]
-    [Min(0.15f)] public float playerHitRadius;
+    [Tooltip("Legacy field — kill radius now follows visual corona size. Kept for older scenes.")]
+    [HideInInspector, Min(0f)] public float playerHitRadius;
 
     [Header("Size / Look")]
     [Tooltip("Overall fireball scale (meters).")]
@@ -20,8 +20,10 @@ public struct DragonFireballSettings
     [Min(1f)] public float bodyStretch;
     [Tooltip("Spin rate of the outer flame petals (deg/sec). Visible head-on.")]
     public float coronaSpinSpeed;
-    [Tooltip("How large the frontal corona is vs the core (1.2–2).")]
+    [Tooltip("How large the frontal corona is vs the core (1.2–2). Also drives hit radius.")]
     [Min(1f)] public float coronaScale;
+    [Tooltip("1 = hit radius matches corona halo. Lower = slightly tighter than the glow.")]
+    [Range(0.5f, 1.1f)] public float visualHitMatch;
     public Color coreColor;
     public Color midColor;
     [Tooltip("Opaque magenta outline (CAVE-safe inverted hull).")]
@@ -42,6 +44,21 @@ public struct DragonFireballSettings
     [Min(0f)] public float explodeLightIntensity;
     [Min(0.5f)] public float explodeLightRange;
 
+    /// <summary>
+    /// World-space kill / dodge radius matching the frontal corona halo.
+    /// Halo local XY scale is coronaScale * 1.05 under a root scaled by <see cref="size"/>.
+    /// </summary>
+    public float VisualHitRadius
+    {
+        get
+        {
+            float diameter = Mathf.Max(0.15f, size);
+            float corona = Mathf.Max(1f, coronaScale);
+            float match = visualHitMatch > 0.05f ? visualHitMatch : 0.9f;
+            return diameter * 0.5f * corona * 1.05f * match;
+        }
+    }
+
     public static DragonFireballSettings Default => new DragonFireballSettings
     {
         speed = 3.2f,
@@ -51,6 +68,7 @@ public struct DragonFireballSettings
         bodyStretch = 1.7f,
         coronaSpinSpeed = 220f,
         coronaScale = 1.55f,
+        visualHitMatch = 0.9f,
         coreColor = new Color(0.85f, 0.55f, 1f, 1f),
         midColor = new Color(0.45f, 0.05f, 0.9f, 1f),
         outlineColor = new Color(1f, 0.15f, 0.9f, 1f),
@@ -256,6 +274,8 @@ public class DragonFireball : MonoBehaviour
     private Material outlineMaterial;
     private Material emberMaterial;
     private float spinAngle;
+    private Vector3 previousPosition;
+    private bool hasPreviousPosition;
     private readonly System.Collections.Generic.List<Material> ownedMaterials =
         new System.Collections.Generic.List<Material>(8);
 
@@ -280,11 +300,12 @@ public class DragonFireball : MonoBehaviour
         DragonFireballSettings settings)
     {
         float diameter = Mathf.Max(0.15f, settings.size);
+        float hitRadius = Mathf.Max(0.05f, settings.VisualHitRadius);
 
         GameObject go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
         go.name = "DragonFireball";
         go.transform.position = worldPosition;
-        // Collider scale stays spherical for fair hits; visuals live under VisualRoot.
+        // Visuals live under VisualRoot at this diameter; collider is sized to match the glow.
         go.transform.localScale = Vector3.one * diameter;
 
         SphereCollider sphere = go.GetComponent<SphereCollider>();
@@ -294,7 +315,8 @@ public class DragonFireball : MonoBehaviour
         }
 
         sphere.isTrigger = true;
-        sphere.radius = 0.5f;
+        // World radius = localScale * radius → set radius so it equals VisualHitRadius.
+        sphere.radius = hitRadius / diameter;
 
         Rigidbody body = go.GetComponent<Rigidbody>();
         if (body == null)
@@ -333,6 +355,8 @@ public class DragonFireball : MonoBehaviour
         killTime = Time.time + Mathf.Max(1f, settings.lifetime);
         resolved = false;
         destroyedByArrow = false;
+        previousPosition = transform.position;
+        hasPreviousPosition = true;
         BuildVisuals();
         FaceVelocity();
         IgnoreDragonColliders();
@@ -387,6 +411,11 @@ public class DragonFireball : MonoBehaviour
         {
             settings.explodeSparkCount = d.explodeSparkCount;
         }
+
+        if (settings.visualHitMatch < 0.05f)
+        {
+            settings.visualHitMatch = d.visualHitMatch;
+        }
     }
 
     private void Update()
@@ -396,7 +425,12 @@ public class DragonFireball : MonoBehaviour
             return;
         }
 
+        Vector3 segmentStart = hasPreviousPosition ? previousPosition : transform.position;
         transform.position += velocity * Time.deltaTime;
+        Vector3 segmentEnd = transform.position;
+        previousPosition = segmentEnd;
+        hasPreviousPosition = true;
+
         FaceVelocity();
         PulseCore();
 
@@ -412,9 +446,7 @@ public class DragonFireball : MonoBehaviour
             return;
         }
 
-        float hitR = Mathf.Max(0.15f, settings.playerHitRadius);
-        Vector3 playerPos = PlayEnvironment.ResolvePlayerAimPosition();
-        if ((transform.position - playerPos).sqrMagnitude <= hitR * hitR)
+        if (IsTouchingPlayerHitVolume(segmentStart, segmentEnd))
         {
             if (TryConsumeNearbyArrow())
             {
@@ -424,6 +456,117 @@ public class DragonFireball : MonoBehaviour
 
             BeginExplode(hitPlayer: true);
         }
+    }
+
+    private bool IsTouchingPlayerHitVolume(Vector3 segmentStart, Vector3 segmentEnd)
+    {
+        if (owner == null || !owner.IsFightActive)
+        {
+            return false;
+        }
+
+        // Same point fireballs aim at — never a second / stale transform.
+        Vector3 center = PlayEnvironment.ResolvePlayerAimPosition();
+        float projectileRadius = Mathf.Max(0.05f, settings.VisualHitRadius);
+        PlayerFireballHitVolume volume = PlayerFireballHitVolume.Ensure();
+        float headRadius = volume != null ? volume.HeadRadius : 0.22f;
+        float combinedRadius = headRadius + projectileRadius;
+
+        // Desktop: 3D sphere at the view camera. CAVE: vertical cylinder at glasses.
+        if (!PlayEnvironment.PreferTrackedGlassesTracking() && PlayEnvironment.IsDesktopInput)
+        {
+            return SegmentSphereHit(segmentStart, segmentEnd, center, combinedRadius, 0.2f);
+        }
+
+        float below = volume != null ? volume.HeightBelowHead : 1.75f;
+        float above = volume != null ? volume.HeightAboveHead : 0.35f;
+        if (volume != null)
+        {
+            return volume.TryEvaluateSegmentHit(
+                segmentStart,
+                segmentEnd,
+                projectileRadius,
+                sampleStepMeters: 0.2f,
+                overrideCenter: center);
+        }
+
+        return HorizontalCylinderHit(segmentStart, segmentEnd, center, combinedRadius, below, above);
+    }
+
+    private static bool SegmentSphereHit(
+        Vector3 segmentStart,
+        Vector3 segmentEnd,
+        Vector3 center,
+        float radius,
+        float sampleStepMeters)
+    {
+        float radiusSq = radius * radius;
+        Vector3 delta = segmentEnd - segmentStart;
+        float length = delta.magnitude;
+        int samples = length > 1e-5f && sampleStepMeters > 1e-4f
+            ? Mathf.Max(1, Mathf.CeilToInt(length / sampleStepMeters))
+            : 1;
+
+        for (int i = 0; i <= samples; i++)
+        {
+            float t = samples == 0 ? 1f : i / (float)samples;
+            Vector3 p = Vector3.Lerp(segmentStart, segmentEnd, t);
+            if ((p - center).sqrMagnitude <= radiusSq)
+            {
+                return true;
+            }
+        }
+
+        // Also catch the true closest point on the segment (avoids missing between samples).
+        if (length > 1e-6f)
+        {
+            float tClosest = Mathf.Clamp01(Vector3.Dot(center - segmentStart, delta) / (length * length));
+            Vector3 closest = segmentStart + delta * tClosest;
+            if ((closest - center).sqrMagnitude <= radiusSq)
+            {
+                return true;
+            }
+        }
+        else if ((segmentStart - center).sqrMagnitude <= radiusSq)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool HorizontalCylinderHit(
+        Vector3 segmentStart,
+        Vector3 segmentEnd,
+        Vector3 center,
+        float radius,
+        float below,
+        float above)
+    {
+        float radiusSq = radius * radius;
+        float yMin = center.y - below;
+        float yMax = center.y + above;
+        Vector3 delta = segmentEnd - segmentStart;
+        float length = delta.magnitude;
+        int samples = length > 1e-5f ? Mathf.Max(1, Mathf.CeilToInt(length / 0.2f)) : 1;
+        for (int i = 0; i <= samples; i++)
+        {
+            float t = i / (float)samples;
+            Vector3 p = Vector3.Lerp(segmentStart, segmentEnd, t);
+            if (p.y < yMin || p.y > yMax)
+            {
+                continue;
+            }
+
+            float dx = p.x - center.x;
+            float dz = p.z - center.z;
+            if (dx * dx + dz * dz <= radiusSq)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void FaceVelocity()
@@ -478,24 +621,13 @@ public class DragonFireball : MonoBehaviour
             return;
         }
 
+        // Player kills use the glasses cylinder test only — never trust Votanic rig triggers.
         ArrowProjectile arrow = other.GetComponentInParent<ArrowProjectile>();
         if (arrow != null && (arrow.IsInFlight || arrow.HasStuck))
         {
             destroyedByArrow = true;
             Destroy(arrow.gameObject);
             BeginExplode(hitPlayer: false);
-            return;
-        }
-
-        if (IsPlayerCollider(other))
-        {
-            if (TryConsumeNearbyArrow())
-            {
-                BeginExplode(hitPlayer: false);
-                return;
-            }
-
-            BeginExplode(hitPlayer: true);
         }
     }
 
@@ -511,25 +643,6 @@ public class DragonFireball : MonoBehaviour
         destroyedByArrow = true;
         Destroy(arrow.gameObject);
         return true;
-    }
-
-    private static bool IsPlayerCollider(Collider other)
-    {
-        if (other == null)
-        {
-            return false;
-        }
-
-        string n = other.transform.name;
-        if (n.IndexOf("Vision", System.StringComparison.OrdinalIgnoreCase) >= 0
-            || n.IndexOf("Head", System.StringComparison.OrdinalIgnoreCase) >= 0
-            || n.IndexOf("Player", System.StringComparison.OrdinalIgnoreCase) >= 0
-            || n.IndexOf("Camera", System.StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-            return true;
-        }
-
-        return other.GetComponentInParent<Camera>() != null;
     }
 
     private void BeginExplode(bool hitPlayer)

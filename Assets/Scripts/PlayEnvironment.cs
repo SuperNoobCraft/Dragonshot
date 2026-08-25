@@ -63,10 +63,13 @@ public class PlayEnvironment : MonoBehaviour
     {
         // vCast often finishes config load after other Awakes — resolve again.
         RefreshResolvedMode(forceLog: true);
+        PlayerFireballHitVolume.Ensure();
     }
 
     private void Update()
     {
+        PlayerFireballHitVolume.Ensure();
+
         if (playEnvironment != PlayEnvironmentMode.Auto)
         {
             return;
@@ -158,14 +161,60 @@ public class PlayEnvironment : MonoBehaviour
     }
 
     /// <summary>
-    /// World aim/eye position — glasses / vision pose when available.
+    /// World aim / fireball target.
+    /// Desktop PC testing: mouse-look view camera.
+    /// CAVE/HMD (including when Votanic reports CAVE but mode is still Auto/Desktop): glasses.
     /// </summary>
     public static Vector3 ResolvePlayerAimPosition()
     {
-        Transform tracking = ResolvePlayerTransform();
-        if (tracking != null)
+        bool useGlasses = PreferTrackedGlassesTracking();
+
+        if (!useGlasses && IsDesktopInput)
         {
-            return tracking.position;
+            Camera desktopCam = ResolveViewCamera();
+            if (desktopCam != null)
+            {
+                return desktopCam.transform.position;
+            }
+
+            Transform desktopParent = ResolveDesktopBowParent();
+            if (desktopParent != null)
+            {
+                return desktopParent.position;
+            }
+        }
+
+        // Tracked: prefer live glasses / sensor pose directly (authoritative room position).
+        Transform vision = ResolveVisionTransform();
+        if (vision != null)
+        {
+            return vision.position;
+        }
+
+        Transform sensor = ResolveSensorTransform();
+        if (sensor != null)
+        {
+            return sensor.position;
+        }
+
+        if (PlayerFireballHitVolume.TryGetHurtboxAimPoint(out Vector3 hurtbox))
+        {
+            return hurtbox;
+        }
+
+        if (!useGlasses)
+        {
+            Transform head = ResolveHeadTransform(allowSynchronizerFallback: true);
+            if (head != null && !IsControllerTransform(head))
+            {
+                return head.position;
+            }
+
+            Camera mainCamera = Camera.main;
+            if (mainCamera != null)
+            {
+                return mainCamera.transform.position;
+            }
         }
 
         Transform user = ResolveUserTransform();
@@ -174,8 +223,34 @@ public class PlayEnvironment : MonoBehaviour
             return user.position + Vector3.up * GetCaveFallbackEyeHeight();
         }
 
-        Camera mainCamera = Camera.main;
-        return mainCamera != null ? mainCamera.transform.position : Vector3.zero;
+        return Vector3.zero;
+    }
+
+    /// <summary>
+    /// True when we should follow physical glasses — CAVE/HMD mode, or Votanic reporting CAVE/HMD
+    /// even if PlayEnvironment has not finished flipping off DesktopPc yet.
+    /// </summary>
+    public static bool PreferTrackedGlassesTracking()
+    {
+        if (IsTrackedXr || IsCaveMode)
+        {
+            return true;
+        }
+
+        try
+        {
+            switch (vCast.environment)
+            {
+                case Votanic.vXR.vCast.Core.SystemType.CAVE:
+                case Votanic.vXR.vCast.Core.SystemType.HMD:
+                    return true;
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        return false;
     }
 
     /// <summary>

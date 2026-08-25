@@ -402,7 +402,7 @@ public class DragonFightUI : MonoBehaviour
 
     public void ShowSurvivalResults(float secondsSurvived, float bestSeconds)
     {
-        SetDefeatTint(false);
+        SetDefeatTint(true);
         instructionOnly = false;
         allowResetDuringEquip = false;
         state = PanelState.Defeat;
