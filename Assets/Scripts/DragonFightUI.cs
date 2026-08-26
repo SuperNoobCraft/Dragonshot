@@ -141,6 +141,18 @@ public class DragonFightUI : MonoBehaviour
     private float defeatTintStartTime;
     private Material defeatTintMaterial;
 
+    public PanelState State => state;
+    public bool IsEndScreen =>
+        state == PanelState.Victory
+        || state == PanelState.Timeout
+        || state == PanelState.Defeat;
+
+    /// <summary>Same as clicking the fight panel (start / reset / arcade exits).</summary>
+    public void TriggerPanelAction()
+    {
+        HandleClick();
+    }
+
     public void Assign(DragonBoss boss, TextMesh textMesh)
     {
         dragon = boss;
@@ -376,6 +388,7 @@ public class DragonFightUI : MonoBehaviour
         state = PanelState.Playing;
         SetText(FormatTemplate(targetPracticePlayingPanelText, secondsRemaining, currentScore, bestScore));
         EnsureInfoHud().ShowText(FormatTemplate(infoHudTargetPracticeText, secondsRemaining, currentScore));
+        NotifyEndScreenResetProps();
     }
 
     public void ShowTargetPracticeResults(int currentScore, int bestScore)
@@ -386,6 +399,7 @@ public class DragonFightUI : MonoBehaviour
         state = PanelState.Timeout;
         SetText(FormatTemplate(targetPracticeResultsPanelText, currentScore, bestScore));
         HideInfoHud();
+        NotifyEndScreenResetProps();
     }
 
     public void ShowSurvivalPlaying(float secondsSurvived, float bestSeconds)
@@ -398,6 +412,7 @@ public class DragonFightUI : MonoBehaviour
         string best = FormatSurvivalTime(bestSeconds);
         SetText(FormatTemplate(survivalPlayingPanelText, survived, best));
         EnsureInfoHud().ShowText(FormatTemplate(infoHudSurvivalText, survived));
+        NotifyEndScreenResetProps();
     }
 
     public void ShowSurvivalResults(float secondsSurvived, float bestSeconds)
@@ -410,6 +425,7 @@ public class DragonFightUI : MonoBehaviour
         string best = FormatSurvivalTime(bestSeconds);
         SetText(FormatTemplate(survivalResultsPanelText, survived, best));
         HideInfoHud();
+        NotifyEndScreenResetProps();
     }
 
     public void ShowStart()
@@ -420,6 +436,7 @@ public class DragonFightUI : MonoBehaviour
         state = PanelState.Start;
         SetText(startPanelText);
         HideInfoHud();
+        NotifyEndScreenResetProps();
     }
 
     public void ShowEquipInstructions(string text)
@@ -491,6 +508,7 @@ public class DragonFightUI : MonoBehaviour
         string template = usedScope ? victoryTextWithScope : victoryTextNoScope;
         SetText(FormatTemplate(template, whole, DifficultyLabel()));
         HideInfoHud();
+        NotifyEndScreenResetProps();
     }
 
     public void ShowTimeout()
@@ -500,6 +518,7 @@ public class DragonFightUI : MonoBehaviour
         state = PanelState.Timeout;
         SetText(FormatTemplate(timeoutText, DifficultyLabel()));
         HideInfoHud();
+        NotifyEndScreenResetProps();
     }
 
     public void ShowDefeat(string cause = "Hit by fireball")
@@ -514,6 +533,23 @@ public class DragonFightUI : MonoBehaviour
         SetText(FormatTemplate(defeatText, cause, DifficultyLabel()));
         SetDefeatTint(true);
         HideInfoHud();
+        NotifyEndScreenResetProps();
+    }
+
+    private void NotifyEndScreenResetProps()
+    {
+#if UNITY_2023_1_OR_NEWER
+        EndScreenResetTouch[] props = FindObjectsByType<EndScreenResetTouch>(FindObjectsSortMode.None);
+#else
+        EndScreenResetTouch[] props = FindObjectsOfType<EndScreenResetTouch>();
+#endif
+        for (int i = 0; i < props.Length; i++)
+        {
+            if (props[i] != null)
+            {
+                props[i].RefreshFromFightUI();
+            }
+        }
     }
 
     private DragonFightInfoHud EnsureInfoHud()
